@@ -175,15 +175,19 @@ class Fake:
 
 
 @pytest.fixture
-def fake(tmp_path):
-    fake = Fake(tmp_path)
-    yield fake
-    fake.close_stores()
+def jobs():
+    return JobStore()
 
 
 @pytest.fixture
-def jobs():
-    return JobStore()
+def fake(tmp_path, jobs):
+    fake = Fake(tmp_path)
+    yield fake
+    # ジョブのスレッドが sqlite に書いている途中で接続を閉じると落ちるため、
+    # 全ジョブの終了を待ってから閉じる。終わらなければ黙って閉じずに失敗させる。
+    idle = jobs.wait_idle(WAIT_S)
+    assert idle, "ジョブが終わらないまま teardown に来た（接続を閉じられない）"
+    fake.close_stores()
 
 
 def _client(fake, jobs, max_upload_bytes=1024, throttle=None):
@@ -580,7 +584,9 @@ def test_upload_too_large_returns_413(fake, jobs):
         assert response.status_code == 413
         assert fake.ingest_uploads_calls == []
         exact = _upload_body(("a.txt", b"x" * 10))
-        assert client.post("/api/uploads", json=exact, headers=CSRF).status_code == 200
+        response = client.post("/api/uploads", json=exact, headers=CSRF)
+        assert response.status_code == 200
+        assert _job_result(client, jobs, response.json()["job_id"])["state"] == "done"
 
 
 def test_upload_returns_503_when_ollama_down(client, fake):
