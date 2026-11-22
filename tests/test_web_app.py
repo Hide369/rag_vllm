@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import docgen
 from ingest import store, vector_store
 from ingest.embedder import EMBED_DIM, EmbeddingError
 from ingest.models import Chunk
@@ -21,6 +22,7 @@ from ingest.parsers import SUPPORTED_SUFFIXES
 from ingest.prompting import format_report
 from rag_web.app import CHAT_MODEL, CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, STATIC_DIR, create_app
 from rag_web.auth import LoginThrottle, hash_password
+from rag_web.cowork import NO_TEMPLATE_LABEL, is_source_suffix, output_suffixes
 from rag_web.jobs import JobStore
 from rag_web.services import Services
 from rag_web.settings import WebSettings
@@ -68,6 +70,14 @@ class Fake:
         self.release: threading.Event | None = None
         self.started = threading.Event()
         self.opened = []
+        self.templates_dir = tmp_path / "templates"
+        self.ask_json_calls = []
+        self.ask_json_reply = "{}"
+        self.ask_text_calls = []
+        self.parse_calls = []
+        # 設定すると ask_json はこれが set されるまで返らない（生成の途中で止める）。
+        self.ask_release: threading.Event | None = None
+        self.ask_started = threading.Event()
 
     def open_store(self, path):
         collection = vector_store.open_store(path)
@@ -84,8 +94,20 @@ class Fake:
         self.chat_calls.append((model, messages, temperature))
         yield from ("東", "京")
 
-    def ask_json(self, model, prompt):
-        return "{}"
+    def ask_json(self, model, prompt, num_ctx=None):
+        self.ask_json_calls.append((model, prompt, num_ctx))
+        self.ask_started.set()
+        if self.ask_release is not None:
+            assert self.ask_release.wait(WAIT_S), "テストが ask_release を set しなかった"
+        return self.ask_json_reply
+
+    def ask_text(self, model, prompt, num_ctx=None):
+        self.ask_text_calls.append((model, prompt, num_ctx))
+        return "# 文書\n\n本文\n"
+
+    def parse(self, path, caption_image=None):
+        self.parse_calls.append(path.name)
+        return []
 
     def search(self, collection, query, **kwargs):
         return []
@@ -133,6 +155,8 @@ class Fake:
         return Services(
             stream_chat=self.stream_chat,
             ask_json=self.ask_json,
+            ask_text=self.ask_text,
+            parse=self.parse,
             search=self.search,
             build_index=self.build_index,
             open_store=self.open_store,
@@ -146,6 +170,7 @@ class Fake:
             ingest_uploads=lambda *args, **kwargs: self.ingest_uploads(*args, **kwargs),
             source_dir=self.source_dir,
             db_paths=self.db_paths,
+            templates_dir=self.templates_dir,
         )
 
 
@@ -667,3 +692,287 @@ def test_index_has_no_model_picker():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="model"' not in html
     assert "モデル名" not in html
+
+
+# --- Cowork とフォーマットファイル --------------------------------------------------------
+
+TEMPLATE_CAPTION = (
+    "フォーマットファイルの空欄は {{会議名}} のように書いてください。"
+    "登録したフォーマットファイルはこのマシンの templates/ に残ります。"
+)
+NO_SUCH_TEMPLATE = "そのフォーマットファイルはありません"
+
+
+def _template_file(fake, name="議事録.md", content="# {{会議名}}\n\n{{決定事項}}\n"):
+    fake.templates_dir.mkdir(parents=True, exist_ok=True)
+    path = fake.templates_dir / name
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+    return name
+
+
+def _cowork_body(**overrides):
+    body = {
+        "question": "第5回会議の議事録を作って",
+        "template": None,
+        "output_suffix": ".md",
+        "use_internal": False,
+        "use_docs": False,
+        "pasted": "会議の記録",
+        "attachments": [],
+    }
+    body.update(overrides)
+    return body
+
+
+def _cowork_result(client, jobs, body):
+    response = client.post("/api/cowork", json=body, headers=CSRF)
+    assert response.status_code == 200, response.text
+    outcome = _job_result(client, jobs, response.json()["job_id"])
+    assert outcome["state"] == "done", outcome
+    return outcome["result"]
+
+
+def test_cowork_options_lists_formats_and_templates(client, fake):
+    _template_file(fake)
+    options = client.get("/api/cowork/options").json()
+    assert options == {
+        "no_template_label": NO_TEMPLATE_LABEL,
+        "output_suffixes": output_suffixes(),
+        "source_suffixes": [s for s in output_suffixes() if is_source_suffix(s)],
+        "attachment_suffixes": sorted(SUPPORTED_SUFFIXES),
+        "template_suffixes": sorted(docgen.SUPPORTED_SUFFIXES),
+        "templates": [
+            {"name": "議事録.md", "placeholders": ["会議名", "決定事項"], "error": None}
+        ],
+    }
+    assert options["source_suffixes"], "ソースコードの出力形式が1つも無い"
+
+
+def test_cowork_runs_as_job_and_returns_download(client, fake, jobs):
+    result = _cowork_result(client, jobs, _cowork_body())
+    assert result["errors"] == []
+    assert result["download"]["file_name"] == "文書_2026-11-22.md"
+    text = base64.b64decode(result["download"]["content_b64"]).decode("utf-8")
+    assert text.startswith("# 文書")
+    assert [call[0] for call in fake.ask_text_calls] == [CHAT_MODEL]
+
+    name = _template_file(fake)
+    fake.ask_json_reply = json.dumps({"会議名": "第5回"}, ensure_ascii=False)
+    result = _cowork_result(client, jobs, _cowork_body(template=name))
+    assert result["download"]["file_name"] == "議事録_2026-11-22.md"
+    text = base64.b64decode(result["download"]["content_b64"]).decode("utf-8")
+    assert "# 第5回" in text
+    assert fake.ask_json_calls[-1][0] == CHAT_MODEL
+
+
+def test_cowork_requires_csrf_header(client, fake):
+    assert client.post("/api/cowork", json=_cowork_body()).status_code == 403
+    wrong = {CSRF_HEADER: "other"}
+    assert client.post("/api/cowork", json=_cowork_body(), headers=wrong).status_code == 403
+    assert fake.ask_text_calls == []
+
+
+def test_cowork_rejects_unknown_output_suffix_and_template(client, fake):
+    response = client.post(
+        "/api/cowork", json=_cowork_body(output_suffix=".exe"), headers=CSRF
+    )
+    assert response.status_code == 422
+    response = client.post(
+        "/api/cowork", json=_cowork_body(template="無い.md"), headers=CSRF
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == NO_SUCH_TEMPLATE
+    # 一覧から引くので、templates/ の外を指す名前も「無い」になる。
+    _template_file(fake)
+    response = client.post(
+        "/api/cowork", json=_cowork_body(template="../templates/議事録.md"), headers=CSRF
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == NO_SUCH_TEMPLATE
+    for body in (_cowork_body(question=""), _cowork_body(pasted="あ" * 100_001)):
+        assert client.post("/api/cowork", json=body, headers=CSRF).status_code == 422
+    too_many = _cowork_body(
+        attachments=_upload_body(*[(f"{i}.txt", b"x") for i in range(21)])["files"]
+    )
+    assert client.post("/api/cowork", json=too_many, headers=CSRF).status_code == 422
+    assert fake.ask_json_calls == []
+    assert fake.ask_text_calls == []
+
+
+@pytest.mark.parametrize("name", ["../a.pdf", "a/b.pdf", "a\\b.pdf", "a.exe", ".."])
+def test_cowork_attachment_checks_match_uploads(client, fake, name):
+    body = _cowork_body(attachments=_upload_body((name, b"x"))["files"])
+    assert client.post("/api/cowork", json=body, headers=CSRF).status_code == 400, name
+    assert fake.parse_calls == []
+    assert fake.ask_text_calls == []
+
+
+def test_cowork_attachment_duplicates_and_total_size(fake, jobs):
+    with _client(fake, jobs, max_upload_bytes=10) as client:
+        case_only = _cowork_body(
+            attachments=_upload_body(("A.txt", b"x"), ("a.txt", b"y"))["files"]
+        )
+        assert client.post("/api/cowork", json=case_only, headers=CSRF).status_code == 400
+        too_large = _cowork_body(
+            attachments=_upload_body(("a.txt", b"x" * 6), ("b.txt", b"y" * 5))["files"]
+        )
+        response = client.post("/api/cowork", json=too_large, headers=CSRF)
+        assert response.status_code == 413
+        assert fake.parse_calls == []
+        exact = _cowork_body(attachments=_upload_body(("a.txt", b"x" * 10))["files"])
+        result = _cowork_result(client, jobs, exact)
+        assert result["errors"] == []
+        assert fake.parse_calls == ["a.txt"]
+
+
+def test_cowork_is_not_blocked_by_shared_operation(client, fake, jobs):
+    fake.release = threading.Event()
+    upload = client.post("/api/uploads", json=_upload_body(("a.txt", b"x")), headers=CSRF)
+    assert upload.status_code == 200
+    try:
+        assert fake.started.wait(WAIT_S)
+        assert jobs.shared_busy() is True
+        response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+        assert response.status_code == 200
+        assert _job_result(client, jobs, response.json()["job_id"])["state"] == "done"
+    finally:
+        fake.release.set()
+    assert _job_result(client, jobs, upload.json()["job_id"])["state"] == "done"
+
+
+def test_cowork_template_removed_during_generation_reports_error(client, fake, jobs):
+    name = _template_file(fake)
+    fake.ask_json_reply = json.dumps({"会議名": "第5回"}, ensure_ascii=False)
+    fake.ask_release = threading.Event()
+    response = client.post("/api/cowork", json=_cowork_body(template=name), headers=CSRF)
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    try:
+        # 印を読み終え、LLM の応答を待っている間に別の人が消す。
+        assert fake.ask_started.wait(WAIT_S)
+        deleted = client.delete(f"/api/templates/{name}", headers=CSRF)
+        assert deleted.status_code == 200
+        assert not (fake.templates_dir / name).exists()
+    finally:
+        fake.ask_release.set()
+    outcome = _job_result(client, jobs, job_id)
+    assert outcome["state"] == "done"
+    assert outcome["result"]["errors"][0].startswith(f"{name} を開けませんでした: ")
+    assert outcome["result"]["download"] is None
+
+
+def test_template_register_and_list(client, fake):
+    assert client.get("/api/templates").json() == {"caption": TEMPLATE_CAPTION, "items": []}
+    body = _upload_body(
+        ("議事録.md", "# {{会議名}}\n\n{{決定事項}}\n".encode("utf-8")),
+        ("空.md", "印なし\n".encode("utf-8")),
+    )
+    response = client.post("/api/templates", json=body, headers=CSRF)
+    assert response.status_code == 200
+    assert response.json() == {"registered": 2}
+    assert client.get("/api/templates").json() == {
+        "caption": TEMPLATE_CAPTION,
+        "items": [
+            {"name": "空.md", "placeholders": [], "error": None},
+            {"name": "議事録.md", "placeholders": ["会議名", "決定事項"], "error": None},
+        ],
+    }
+    # 同名は上書き（差し替え）。
+    replaced = _upload_body(("議事録.md", "{{日付}}\n".encode("utf-8")))
+    response = client.post("/api/templates", json=replaced, headers=CSRF)
+    assert response.json() == {"registered": 1}
+    items = client.get("/api/templates").json()["items"]
+    assert items[1] == {"name": "議事録.md", "placeholders": ["日付"], "error": None}
+
+
+@pytest.mark.parametrize("name", ["../x.md", "a/b.md", "a\\b.md", "x.exe", "..", ""])
+def test_template_register_rejects_unsafe_names(client, fake, tmp_path, name):
+    response = client.post(
+        "/api/templates", json=_upload_body((name, b"# {{x}}")), headers=CSRF
+    )
+    assert response.status_code == 400, name
+    assert not (tmp_path / "x.md").exists()
+    assert not (tmp_path / "b.md").exists()
+    assert not fake.templates_dir.exists() or not any(fake.templates_dir.iterdir())
+
+
+def test_template_register_requires_one_to_twenty_files_and_csrf(client, fake):
+    assert client.post("/api/templates", json={"files": []}, headers=CSRF).status_code == 422
+    many = _upload_body(*[(f"{i}.md", b"x") for i in range(21)])
+    assert client.post("/api/templates", json=many, headers=CSRF).status_code == 422
+    one = _upload_body(("a.md", b"x"))
+    assert client.post("/api/templates", json=one).status_code == 403
+    name = _template_file(fake)
+    assert client.delete(f"/api/templates/{name}").status_code == 403
+    assert sorted(p.name for p in fake.templates_dir.iterdir()) == [name]
+
+
+def test_template_register_too_large_returns_413(fake, jobs):
+    with _client(fake, jobs, max_upload_bytes=10) as client:
+        body = _upload_body(("a.md", b"x" * 6), ("b.md", b"y" * 5))
+        assert client.post("/api/templates", json=body, headers=CSRF).status_code == 413
+        assert not fake.templates_dir.exists()
+
+
+@pytest.mark.parametrize("encoded", ["..%2Fx.md", "a%2F..%2F..%2Fx.md", "a%5Cx.md", "%2E%2E"])
+def test_template_delete_rejects_unsafe_names(client, fake, tmp_path, encoded):
+    _template_file(fake, name="x.md")
+    outside = tmp_path / "x.md"
+    outside.write_text("外", encoding="utf-8")
+    response = client.delete(f"/api/templates/{encoded}", headers=CSRF)
+    assert response.status_code == 400, encoded
+    assert outside.read_text(encoding="utf-8") == "外"
+    assert (fake.templates_dir / "x.md").exists()
+
+
+def test_template_delete_unknown_returns_404(client, fake, jobs):
+    _template_file(fake, name="x.md")
+    response = client.delete("/api/templates/missing.md", headers=CSRF)
+    assert response.status_code == 404
+    assert response.json()["detail"] == NO_SUCH_TEMPLATE
+    # 404 で抜けても共有ロックは解放されている。
+    assert jobs.shared_busy() is False
+    response = client.delete("/api/templates/x.md", headers=CSRF)
+    assert response.status_code == 200
+    assert client.get("/api/templates").json()["items"] == []
+
+
+def test_template_operations_return_409_while_shared_busy(client, fake, jobs):
+    name = _template_file(fake)
+    fake.release = threading.Event()
+    upload = client.post("/api/uploads", json=_upload_body(("a.txt", b"x")), headers=CSRF)
+    assert upload.status_code == 200
+    try:
+        assert fake.started.wait(WAIT_S)
+        responses = [
+            client.post(
+                "/api/templates", json=_upload_body(("b.md", b"{{x}}")), headers=CSRF
+            ),
+            client.delete(f"/api/templates/{name}", headers=CSRF),
+        ]
+        for response in responses:
+            assert response.status_code == 409
+            assert response.json()["detail"] == BUSY_MESSAGE
+        # 一覧はロックを取らないので見られる。
+        assert client.get("/api/templates").status_code == 200
+    finally:
+        fake.release.set()
+    assert _job_result(client, jobs, upload.json()["job_id"])["state"] == "done"
+    assert sorted(p.name for p in fake.templates_dir.iterdir()) == [name]
+
+
+def test_broken_template_is_listed_with_error(client, fake):
+    _template_file(fake, name="壊れた.docx", content=b"not a zip")
+    for items in (
+        client.get("/api/templates").json()["items"],
+        client.get("/api/cowork/options").json()["templates"],
+    ):
+        assert len(items) == 1
+        assert items[0]["name"] == "壊れた.docx"
+        assert items[0]["placeholders"] is None
+        assert items[0]["error"]
+    # 壊れていても一覧から消せる（消せる場所がここしか無い）。
+    assert client.delete("/api/templates/壊れた.docx", headers=CSRF).status_code == 200
