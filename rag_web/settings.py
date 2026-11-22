@@ -12,6 +12,7 @@ from typing import Mapping
 
 _TRUE = {"true", "1", "yes"}
 _FALSE = {"false", "0", "no"}
+_MAX_PORT = 65535
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,14 @@ def _positive_int(environ: Mapping[str, str], name: str, default: int) -> int:
     return value
 
 
+def _port(environ: Mapping[str, str], name: str, default: int) -> int:
+    value = _positive_int(environ, name, default)
+    if value > _MAX_PORT:
+        raise ValueError(
+            f"{name} は1〜{_MAX_PORT}の整数で指定してください（現在の値: {environ[name]!r}）")
+    return value
+
+
 def _bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
     raw = environ.get(name)
     if raw is None or raw.strip() == "":
@@ -58,7 +67,7 @@ def load_web_settings(environ: Mapping[str, str] = os.environ) -> WebSettings:
     return WebSettings(
         admin_password_hash=password_hash,
         host=host,
-        port=_positive_int(environ, "RAG_WEB_PORT", WebSettings.port),
+        port=_port(environ, "RAG_WEB_PORT", WebSettings.port),
         max_upload_bytes=_positive_int(
             environ, "RAG_WEB_MAX_UPLOAD_MB", WebSettings.max_upload_bytes // (1024 * 1024)
         ) * 1024 * 1024,
