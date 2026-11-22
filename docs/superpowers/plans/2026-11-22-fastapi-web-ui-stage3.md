@@ -241,10 +241,23 @@ git commit -m "feat: add VectorStore.close and use it in web tests"
 
 ---
 
-### Task 4: 文書を GB10 への配置に合わせて書き換える
+### Task 4: 文書を新しい画面に合わせて書き換える
+
+> **2026-11-22 変更:** 本番の推論を Ollama から vLLM へ切り替えることになった
+> （`docs/superpowers/specs/2026-11-22-vllm-backend-design.md`）。GB10 の配置手順は
+> vLLM 前提で書くため、**Step 1 はこの段階では行わない**。代わりに `docs/server-deployment.md` を
+> 短い案内に置き換える。案内には次の3点を書く。
+> - 配置手順は、vLLM への切り替えのときに GB10 向けに書き直す。
+> - それまで本番には配置しない。
+> - 設計書へのリンク。
+>
+> Step 2 以降のうち、GB10 の手順に依るもの（README のリンク先など）は、この案内を指す。
+> 設計書の申し送り（Step 3）は、次のように分けて書く。
+> - Nginx の設定で対処する項目: 「vLLM 切り替えの配置手順で対処」とする。
+> - コードで対処した項目: 結果を書く。
 
 **Files:**
-- Modify（全面的に書き直す）: `docs/server-deployment.md` を GB10（Ubuntu）への配置手順にする。題名は「Web 画面を GB10（Ubuntu）へ配置する」とする。
+- Modify: `docs/server-deployment.md` を、上の短い案内に置き換える。下の Step 1 は、vLLM 切り替えの計画へ移す。
 - Delete: `docs/server-deployment-windows.md`、`docs/server-set.md`
 - Modify: `README.md`
 - Modify（アプリとしての Streamlit や Windows サーバーへの言及とリンクだけを直す。コーパスとしての streamlit は残す）:
