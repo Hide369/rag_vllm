@@ -301,13 +301,6 @@ async function loadStatus() {
   if (corpus !== state.corpus) return;
   show("status-error", "");
 
-  const select = $("model");
-  const current = select.value;
-  if ([...select.options].map((o) => o.value).join("\n") !== status.models.join("\n")) {
-    select.replaceChildren(...status.models.map((name) => el("option", { value: name, textContent: name })));
-    if (status.models.includes(current)) select.value = current;
-  }
-
   show("chunk-count", String(status.chunk_count));
   const docs = corpus === "docs";
   setHidden("docs-panel", !docs);
@@ -596,7 +589,6 @@ async function ask(question) {
       headers: { "Content-Type": "application/json", ...CSRF },
       body: JSON.stringify({
         corpus: state.corpus,
-        model: $("model").value,
         temperature: Number($("temperature").value),
         question,
         history,

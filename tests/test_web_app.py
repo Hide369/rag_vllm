@@ -19,7 +19,7 @@ from ingest.embedder import EMBED_DIM, EmbeddingError
 from ingest.models import Chunk
 from ingest.parsers import SUPPORTED_SUFFIXES
 from ingest.prompting import format_report
-from rag_web.app import CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, MODELS, create_app
+from rag_web.app import CHAT_MODEL, CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, STATIC_DIR, create_app
 from rag_web.auth import LoginThrottle, hash_password
 from rag_web.jobs import JobStore
 from rag_web.services import Services
@@ -203,7 +203,6 @@ def _job_result(client, jobs, job_id):
 def _chat_body(**overrides):
     body = {
         "corpus": "internal",
-        "model": MODELS[0],
         "temperature": 0.2,
         "question": "首都は？",
         "history": [],
@@ -315,7 +314,6 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     response = client.get("/api/status", params={"corpus": "internal"})
     assert response.status_code == 200
     assert response.json() == {
-        "models": MODELS,
         "corpus": "internal",
         "chunk_count": 0,
         "source_dir_name": "source",
@@ -358,7 +356,7 @@ def test_chat_streams_ndjson_events(client, fake):
     # 日本語をエスケープせずに送る。
     assert '"東"' in response.text
     model, messages, temperature = fake.chat_calls[0]
-    assert model == MODELS[0]
+    assert model == CHAT_MODEL
     assert temperature == 0.2
     assert "2026年11月22日" in messages[0]["content"]
 
@@ -400,9 +398,8 @@ def test_chat_accepts_long_question(client, fake):
     assert len(fake.chat_calls) == 1
 
 
-def test_chat_rejects_unknown_model_and_out_of_range_temperature(client, fake):
+def test_chat_rejects_out_of_range_temperature_and_unknown_corpus(client, fake):
     for body in (
-        _chat_body(model="unknown:1b"),
         _chat_body(temperature=1.5),
         _chat_body(temperature=-0.1),
         _chat_body(corpus="other"),
@@ -656,3 +653,17 @@ def test_failed_job_reports_error(client, fake, jobs):
         "state": "failed",
         "error": "壊れた",
     }
+
+
+def test_chat_ignores_client_supplied_model(client, fake):
+    # モデルは画面から選ばせない。古い画面が送ってきても、サーバーの CHAT_MODEL で答える。
+    response = client.post("/api/chat", json=_chat_body(model="unknown:1b"), headers=CSRF)
+    assert response.status_code == 200
+    model, _messages, _temperature = fake.chat_calls[0]
+    assert model == CHAT_MODEL
+
+
+def test_index_has_no_model_picker():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="model"' not in html
+    assert "モデル名" not in html
