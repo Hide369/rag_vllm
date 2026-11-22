@@ -11,6 +11,8 @@ const POLL_MS = 2000;
 const POLL_MAX_FAILURES = 5;
 // サーバーが受け付ける履歴の件数の上限（rag_web/app.py の ChatBody.history）
 const HISTORY_LIMIT = 100;
+// サーバーが受け付ける質問の文字数の上限（rag_web/app.py の ChatBody.question）
+const QUESTION_MAX_CHARS = 100000;
 const SPINNER_MESSAGE = "取り込み中…（図表があると時間がかかります）";
 const CONNECTION_LOST = "回答を生成できませんでした: 通信が切れました";
 const MERMAID_SRC = "/vendor/mermaid-12.3.0.min.js";
@@ -57,6 +59,23 @@ async function errorMessage(res) {
       : detail || message;
   } catch (_) { /* 本文が JSON でない（プロキシのエラーページなど）。状態コードで伝える */ }
   return message;
+}
+
+// チャットの入力がサーバーの検証（422）で弾かれたときの文言。pydantic の英語の
+// メッセージは利用者に見せず、どの項目が原因かだけを日本語で伝える。
+async function chatRejectedMessage(res) {
+  let fields = [];
+  try {
+    const detail = (await res.json()).detail;
+    if (Array.isArray(detail)) fields = detail.map((d) => (d.loc || [])[1]);
+  } catch (_) { /* 本文が JSON でない。下の汎用の文言で伝える */ }
+  if (fields.includes("question")) {
+    return `質問が長すぎます（${QUESTION_MAX_CHARS.toLocaleString("ja-JP")}文字まで）。短くしてから送ってください。`;
+  }
+  if (fields.includes("history")) {
+    return "会話履歴が長すぎます。「会話履歴をリセット」を押してから質問してください。";
+  }
+  return "入力の形式が正しくないため、質問を送れませんでした。";
 }
 
 async function api(path, options = {}) {
@@ -384,6 +403,9 @@ async function runJob(prefix, start) {
     return true;
   } catch (error) {
     show(`${prefix}-error`, error.message);
+    // 管理者の操作が 401 なら、セッションが切れている（期限切れ・サーバーの再起動）。
+    // ログイン済みの見た目のままにせず、ログイン欄へ戻す
+    if (error instanceof ApiError && error.status === 401) await loadMe();
     return false;
   } finally {
     show(`${prefix}-progress`, "");
@@ -551,7 +573,7 @@ async function ask(question) {
   scrollToBottom();
 
   let answer = "";
-  let finished = null; // { content, display } または { error }
+  let finished = null; // { content, display } または { error, rejected? }
   let evidence = null;
   let pending = false;
   const redraw = () => {
@@ -580,7 +602,10 @@ async function ask(question) {
         history,
       }),
     });
-    if (!response.ok) {
+    if (response.status === 422) {
+      // 質問そのものが受け付けられなかった。履歴に残すと次の質問も同じ理由で弾かれ続ける
+      finished = { error: await chatRejectedMessage(response), rejected: true };
+    } else if (!response.ok) {
       finished = { error: `回答を生成できませんでした: ${await errorMessage(response)}` };
     } else {
       for await (const event of readEvents(response)) {
@@ -617,7 +642,12 @@ async function ask(question) {
       answerBox.replaceChildren();
     }
     answerBox.append(el("div", { className: "msg error", textContent: finished.error }));
-    state.history.push({ role: "assistant", content: finished.error });
+    if (finished.rejected) {
+      // 送れなかった質問は会話に含めない。上で積んだ user の発言を取り除き、組を残さない
+      state.history.pop();
+    } else {
+      state.history.push({ role: "assistant", content: finished.error });
+    }
   } else {
     state.history.push({ role: "assistant", content: finished.content });
   }
