@@ -976,3 +976,50 @@ def test_broken_template_is_listed_with_error(client, fake):
         assert items[0]["error"]
     # 壊れていても一覧から消せる（消せる場所がここしか無い）。
     assert client.delete("/api/templates/壊れた.docx", headers=CSRF).status_code == 200
+
+
+# Windows で別物になる名前（代替データストリーム・予約デバイス名・末尾の . と空白・制御文字）。
+WINDOWS_TRICK_NAMES = ["ab:y.md", "x.md:s.md", "NUL.md", "con.txt", "a.md.", "a.md ", "a\x01.md"]
+
+
+def _files_under(directory):
+    return sorted(p.name for p in directory.rglob("*")) if directory.exists() else []
+
+
+@pytest.mark.parametrize("name", WINDOWS_TRICK_NAMES)
+def test_template_register_rejects_windows_trick_names(client, fake, tmp_path, name):
+    existing = _template_file(fake, name="x.md")
+    before = _files_under(tmp_path)
+    response = client.post(
+        "/api/templates", json=_upload_body((name, b"# {{x}}")), headers=CSRF
+    )
+    assert response.status_code == 400, name
+    assert _files_under(tmp_path) == before
+    assert (fake.templates_dir / existing).read_text(encoding="utf-8").startswith("# {{会議名}}")
+
+
+@pytest.mark.parametrize("name", WINDOWS_TRICK_NAMES)
+def test_cowork_attachment_rejects_windows_trick_names(client, fake, name):
+    body = _cowork_body(attachments=_upload_body((name, b"x"))["files"])
+    assert client.post("/api/cowork", json=body, headers=CSRF).status_code == 400, name
+    assert fake.parse_calls == []
+    assert fake.ask_text_calls == []
+
+
+@pytest.mark.parametrize("name", WINDOWS_TRICK_NAMES)
+def test_upload_rejects_windows_trick_names(client, fake, name):
+    response = client.post("/api/uploads", json=_upload_body((name, b"x")), headers=CSRF)
+    assert response.status_code == 400, name
+    assert fake.ingest_uploads_calls == []
+
+
+def test_template_register_reports_partial_failure(client, fake):
+    # 2件目の登録先がディレクトリで、コピーが OSError になる状況を作る。
+    (fake.templates_dir / "b.md").mkdir(parents=True)
+    body = _upload_body(("a.md", b"{{x}}"), ("b.md", b"{{y}}"))
+    response = client.post("/api/templates", json=body, headers=CSRF)
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail.startswith("b.md を登録できませんでした: ")
+    assert detail.endswith("（登録済み: a.md）")
+    assert [item["name"] for item in client.get("/api/templates").json()["items"]] == ["a.md"]

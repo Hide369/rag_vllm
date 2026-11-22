@@ -80,6 +80,11 @@ NO_SUCH_TEMPLATE_MESSAGE = "そのフォーマットファイルはありませ�
 UNSUPPORTED_UPLOAD = "取り込めない種類のファイルです"
 UNSUPPORTED_ATTACHMENT = "添付できない種類のファイルです"
 UNSUPPORTED_TEMPLATE = "フォーマットファイルとして使えない形式です"
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
 
 # すべての応答に付けるヘッダー。index.html の meta の CSP は frame-ancestors を
 # 扱えない（meta では無視される）ため、埋め込み禁止はヘッダーで送る。
@@ -159,6 +164,17 @@ def _check_file_name(name: str) -> None:
         or ".." in name
     ):
         raise HTTPException(400, f"ファイル名にパスは含められません: {name}")
+    # Windows では次の名前が別物になる。":" は代替データストリーム（"ab:y.md" は
+    # 拡張子の無い "ab" を作り、"議事録.md:x.md" は既存の雛形にストリームを足す）、
+    # 末尾の "." と空白は黙って落とされ、予約デバイス名は実ファイルにならない。
+    # どれも一覧に出ず消せないファイルや、意図しない書き込み先を生むため拒む。
+    if (
+        ":" in name
+        or any(ord(char) < 32 for char in name)
+        or name.endswith((".", " "))
+        or name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES
+    ):
+        raise HTTPException(400, f"ファイル名に使えない文字か名前です: {name}")
 
 
 def _check_upload_name(
@@ -200,6 +216,13 @@ def _decode_uploads(
             )
         decoded.append((file.name, content))
     return decoded
+
+
+def _partial_registration_message(
+    failed: str, error: Exception, registered: list[str]
+) -> str:
+    done = "、".join(registered) if registered else "なし"
+    return f"{failed} を登録できませんでした: {error}（登録済み: {done}）"
 
 
 def _template_items(services: Services) -> list[dict]:
@@ -503,17 +526,29 @@ def create_app(
             body.files, settings.max_upload_bytes,
             docgen.SUPPORTED_SUFFIXES, UNSUPPORTED_TEMPLATE,
         )
+        # 順序は「全件の検査（_decode_uploads）→ 全件を一時フォルダへ書く → 全件を
+        # 登録」。名前・拡張子・サイズ・base64 の誤りは templates/ に触れる前に断る。
+        # それでも登録の途中で失敗したら（ディスクの異常など）、そこまでに登録した
+        # ものは残るため、黙らずに応答で伝える。
         with jobs.shared_operation():
             with tempfile.TemporaryDirectory() as workspace:
+                paths = []
                 for name, content in files:
                     path = Path(workspace) / name
                     path.write_bytes(content)
+                    paths.append(path)
+                registered: list[str] = []
+                for path in paths:
                     try:
                         docgen_templates.register(path, directory=services.templates_dir)
-                    except (ValueError, docgen.UnsupportedTemplateError) as e:
-                        # 名前と拡張子は上で確かめてあるが、docgen 側の検査も 400 にする。
-                        raise HTTPException(400, str(e)) from e
-        return {"registered": len(files)}
+                    except (ValueError, docgen.UnsupportedTemplateError, OSError) as e:
+                        # ValueError 等は上の検査で通常は来ない。docgen 側の検査も 400 にする。
+                        status = 500 if isinstance(e, OSError) else 400
+                        raise HTTPException(
+                            status, _partial_registration_message(path.name, e, registered)
+                        ) from e
+                    registered.append(path.name)
+        return {"registered": len(registered)}
 
     @app.delete("/api/templates/{name:path}", dependencies=[Depends(require_csrf_header)])
     def delete_template(name: str) -> dict:
