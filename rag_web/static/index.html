@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 回答と資料の本文は信頼しない入力。サニタイズが取りこぼした外部 URL（SVG の image、
+     背景属性など）があっても、ブラウザが社外へ取りに行かないよう同一オリジンに閉じる。
+     style の 'unsafe-inline' は下の <style> と mermaid が SVG に埋める style のため -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
 <title>社内文書RAG</title>
 <!-- アイコンは持たない。指定しないとブラウザが /favicon.ico を取りに行き、404 が残る -->
 <link rel="icon" href="data:,">

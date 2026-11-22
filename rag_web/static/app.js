@@ -21,9 +21,11 @@ const UPLOAD_SUFFIXES = [
   ".json", ".md", ".mod", ".pdf", ".png", ".pptx", ".ps1", ".py", ".sh", ".sum",
   ".ts", ".tsx", ".txt", ".vue", ".xlsm", ".xlsx", ".yaml", ".yml",
 ];
-// 回答の Markdown に許さない要素。画像・動画は外部 URL を読みに行き（社外への通信になる）、
-// style は画面全体の見た目を書き換えられる。
-const FORBIDDEN_TAGS = ["style", "img", "picture", "source", "video", "audio", "track", "form"];
+// 回答の Markdown に許さない要素と属性。画像・動画・背景は外部 URL を読みに行き（回答に
+// 仕込まれた URL へ質問や資料の中身を送る経路になる）、style は画面全体の見た目を書き換えられる。
+// 最後の砦は index.html の CSP で、ここは描画の段階で落としておく1枚目である。
+const FORBIDDEN_TAGS = ["style", "img", "picture", "source", "video", "audio", "track", "form", "input"];
+const FORBIDDEN_ATTRS = ["style", "background", "srcset", "poster"];
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,7 +35,6 @@ const state = {
   // 会話履歴。サーバーへ送るのは {role, content} だけ（表示用の情報は DOM が持つ）
   history: [],
   generating: false,
-  ingesting: false,
   uploading: false,
 };
 
@@ -102,7 +103,12 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 });
 
 function sanitizeHtml(html) {
-  return DOMPurify.sanitize(html, { FORBID_TAGS: FORBIDDEN_TAGS, FORBID_ATTR: ["style"] });
+  // html プロファイルだけを許す。既定のままだと SVG の <image href> や feImage が通る。
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: FORBIDDEN_TAGS,
+    FORBID_ATTR: FORBIDDEN_ATTRS,
+  });
 }
 
 function renderMarkdown(text) {
@@ -222,7 +228,9 @@ function renderAnswer(container, text, display) {
     return;
   }
   const rendered = renderMarkdown(text);
-  for (const code of rendered.querySelectorAll("pre > code.language-mermaid")) {
+  for (const code of rendered.querySelectorAll("pre > code")) {
+    // ```Mermaid も図にする（answer_text の _MERMAID_FENCE は大文字小文字を区別しない）
+    if (![...code.classList].some((name) => name.toLowerCase() === "language-mermaid")) continue;
     const definition = code.textContent.trim();
     if (definition) code.parentElement.replaceWith(renderDiagram(definition));
   }
@@ -383,13 +391,11 @@ async function runJob(prefix, start) {
 }
 
 $("ingest").addEventListener("click", async () => {
-  state.ingesting = true;
   $("ingest").disabled = true;
   try {
     await runJob("ingest", () => send("POST", "/api/ingest"));
     await loadStatus();
   } finally {
-    state.ingesting = false;
     $("ingest").disabled = false;
   }
 });
@@ -494,7 +500,14 @@ function addBubble(role) {
 }
 
 function scrollToBottom() {
-  $("chat-form").scrollIntoView({ block: "end" });
+  // 入力欄は sticky で常に見えているため、scrollIntoView では動かない。ページの末尾へ送る
+  window.scrollTo(0, document.documentElement.scrollHeight);
+}
+
+// 利用者が上へ戻って読んでいるときは、逐次表示で引き戻さない
+function nearBottom() {
+  const root = document.documentElement;
+  return window.innerHeight + window.scrollY >= root.scrollHeight - 120;
 }
 
 // NDJSON を1行ずつ読む。途中で切れたら（done も error も来ないまま終われば）例外にする
@@ -502,19 +515,25 @@ async function* readEvents(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newline;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (line) yield JSON.parse(line);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) yield JSON.parse(line);
+      }
     }
+    buffer += decoder.decode();
+    if (buffer.trim()) yield JSON.parse(buffer);
+  } finally {
+    // done / error で読むのをやめたときも、例外のときも、接続を手放す
+    reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) yield JSON.parse(buffer);
 }
 
 async function ask(question) {
@@ -541,7 +560,10 @@ async function ask(question) {
     pending = true;
     requestAnimationFrame(() => {
       pending = false;
-      if (!finished) renderPartial(answerBox, answer);
+      if (finished) return;
+      const follow = nearBottom();
+      renderPartial(answerBox, answer);
+      if (follow) scrollToBottom();
     });
   };
 
@@ -574,16 +596,32 @@ async function ask(question) {
   }
   if (!finished) finished = { error: CONNECTION_LOST };
 
+  const follow = nearBottom();
+  if (!finished.error) {
+    try {
+      renderAnswer(answerBox, finished.content, finished.display);
+      if (evidence) bubble.append(...renderEvidence(evidence.hits, evidence.table));
+    } catch (error) {
+      // 描画に失敗しても、履歴の user / assistant の組は崩さない
+      console.error("回答の描画に失敗しました", error);
+      finished = { error: `回答を生成できませんでした: ${error.message || error}` };
+    }
+  }
   if (finished.error) {
-    // エラー文も履歴に残す（Streamlit 版と同じく assistant の発言として）
-    answerBox.replaceChildren(el("div", { className: "msg error", textContent: finished.error }));
+    // 途中まで届いた回答は消さずに残し、その下にエラーを出す。履歴にはエラー文を残す
+    // （Streamlit 版と同じく assistant の発言として）
+    try {
+      if (answer) renderPartial(answerBox, answer);
+      else answerBox.replaceChildren();
+    } catch (_) {
+      answerBox.replaceChildren();
+    }
+    answerBox.append(el("div", { className: "msg error", textContent: finished.error }));
     state.history.push({ role: "assistant", content: finished.error });
   } else {
-    renderAnswer(answerBox, finished.content, finished.display);
-    if (evidence) bubble.append(...renderEvidence(evidence.hits, evidence.table));
     state.history.push({ role: "assistant", content: finished.content });
   }
-  scrollToBottom();
+  if (follow) scrollToBottom();
 }
 
 $("chat-form").addEventListener("submit", async (event) => {

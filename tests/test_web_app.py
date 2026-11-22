@@ -236,6 +236,25 @@ def test_vendor_assets_are_served_and_referenced_locally(client):
         assert response.content, name
 
 
+def test_index_declares_content_security_policy(client):
+    # 回答に仕込まれた外部 URL（SVG の image、背景属性など）をサニタイズが取りこぼしても、
+    # ブラウザが外へ取りに行かないよう CSP で同一オリジンに閉じる。
+    match = re.search(
+        r'<meta http-equiv="Content-Security-Policy" content="([^"]*)">',
+        client.get("/").text,
+    )
+    assert match, "index.html に CSP の meta が無い"
+    directives = {
+        part.split()[0]: part.split()[1:]
+        for part in match.group(1).split(";")
+        if part.strip()
+    }
+    assert directives["default-src"] == ["'self'"]
+    assert directives["connect-src"] == ["'self'"]
+    assert directives["script-src"] == ["'self'"]
+    assert directives["object-src"] == ["'none'"]
+
+
 def test_upload_accept_list_matches_supported_suffixes(client):
     # 対応拡張子を API で返していないため、画面側に写しを持つ。食い違うと、選べない
     # 資料が出るか、選べても 400 で弾かれる。
