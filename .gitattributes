@@ -17,3 +17,7 @@ docs/pg_data/** -text
 # systemd のユニットも GB10 へ運んで置く。CR が残ると値の末尾に付いたまま読まれ、
 # ExecStart や環境変数が壊れる。
 *.service text eol=lf
+
+# 画面に同梱する JS ライブラリは npm の tarball から取り出したままのバイト列で置く
+# （docs/依存関係一覧.md）。autocrlf で CRLF に変わると取得元との照合ができなくなる。
+rag_web/static/vendor/** -text

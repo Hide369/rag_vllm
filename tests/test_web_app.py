@@ -6,6 +6,7 @@
 
 import base64
 import json
+import re
 import threading
 from datetime import date
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 from ingest import store, vector_store
 from ingest.embedder import EMBED_DIM, EmbeddingError
 from ingest.models import Chunk
+from ingest.parsers import SUPPORTED_SUFFIXES
 from ingest.prompting import format_report
 from rag_web.app import CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, MODELS, create_app
 from rag_web.auth import LoginThrottle, hash_password
@@ -217,6 +219,30 @@ def test_index_and_assets_are_served_without_external_urls(client):
         assert "http://" not in response.text
         assert "https://" not in response.text
     assert "javascript" in client.get("/app.js").headers["content-type"]
+
+
+def test_vendor_assets_are_served_and_referenced_locally(client):
+    # 画面は外部の CDN を使わない。Markdown 描画・サニタイズ・Mermaid の3つを
+    # 同梱し、index.html と app.js が参照する /vendor/*.js がすべて返ることを確かめる
+    # （mermaid は大きいので app.js が必要になったときに読み込む）。
+    referenced = set()
+    for path in ("/", "/app.js"):
+        referenced |= set(re.findall(r"/vendor/([\w.-]+\.js)", client.get(path).text))
+    for library in ("marked", "purify", "mermaid"):
+        assert any(name.startswith(f"{library}-") for name in referenced), library
+    for name in referenced:
+        response = client.get(f"/vendor/{name}")
+        assert response.status_code == 200, name
+        assert response.content, name
+
+
+def test_upload_accept_list_matches_supported_suffixes(client):
+    # 対応拡張子を API で返していないため、画面側に写しを持つ。食い違うと、選べない
+    # 資料が出るか、選べても 400 で弾かれる。
+    script = client.get("/app.js").text
+    match = re.search(r"const UPLOAD_SUFFIXES = \[(.*?)\];", script, re.DOTALL)
+    assert match, "app.js に UPLOAD_SUFFIXES が無い"
+    assert set(re.findall(r'"(\.[\w]+)"', match.group(1))) == SUPPORTED_SUFFIXES
 
 
 def test_vendor_serves_only_files_directly_under_vendor(client):
