@@ -86,9 +86,31 @@ def test_index_not_shared_between_corpora_with_equal_revision(services):
     assert cache.index("internal") is not cache.index("docs")
 
 
-def test_schema_keyed_by_revision_and_corpus(services):
+def _write_numeric(collection, source, value):
+    chunk = Chunk(
+        id=f"{source}::page1::0",
+        text="本文",
+        metadata={
+            "source": source,
+            "file_hash": "h",
+            "location_type": "page",
+            "location": 1,
+            "ocr": False,
+            "chunk_index": 0,
+            "indexed_at": "2026-08-11",
+            "amount": value,
+        },
+    )
+    store.replace_source(collection, source, [chunk], [[0.1] * EMBED_DIM])
+
+
+def test_schema_follows_revision_and_is_not_shared_between_corpora(services):
     cache = CorpusCache(services)
     assert cache.schema("internal") == {}
+    assert cache.schema("docs") == {}
+    _write_numeric(cache.collection("internal"), "a.txt", 5)
+    updated = cache.schema("internal")
+    assert "amount" in updated
     assert cache.schema("docs") == {}
 
 
@@ -126,9 +148,30 @@ def test_reranker_failure_retried_next_time(services):
     assert cache.reranker_status()["state"] == "ready"
 
 
+class _ObservedLock:
+    """acquire の試行を数え、2回目の試行（待たされる側）を Event で知らせる。"""
+
+    def __init__(self, second_attempt):
+        self._lock = threading.Lock()
+        self._guard = threading.Lock()
+        self._attempts = 0
+        self._second_attempt = second_attempt
+
+    def __enter__(self):
+        with self._guard:
+            self._attempts += 1
+            if self._attempts == 2:
+                self._second_attempt.set()
+        self._lock.acquire()
+
+    def __exit__(self, *exc_info):
+        self._lock.release()
+
+
 def test_reranker_check_not_run_concurrently(services):
     entered = threading.Event()
     release = threading.Event()
+    second_attempt = threading.Event()
     calls = []
 
     def check():
@@ -137,6 +180,8 @@ def test_reranker_check_not_run_concurrently(services):
         assert release.wait(timeout=10)
 
     cache = CorpusCache(replace(services, check_reranker=check))
+    # 直列化用のロックを観測用に差し替え、2本目が待ち始めたことを確かめる。
+    cache._rerank_check_lock = _ObservedLock(second_attempt)
     results = []
     first = threading.Thread(target=lambda: results.append(cache.rerank_callable()))
     first.start()
@@ -144,6 +189,8 @@ def test_reranker_check_not_run_concurrently(services):
     assert cache.reranker_status()["state"] == "checking"
     second = threading.Thread(target=lambda: results.append(cache.rerank_callable()))
     second.start()
+    assert second_attempt.wait(timeout=10)
+    assert len(calls) == 1
     release.set()
     first.join(timeout=10)
     second.join(timeout=10)

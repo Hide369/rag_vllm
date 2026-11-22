@@ -51,6 +51,8 @@ class CorpusCache:
         数値になることは普通に起こる。db_path を鍵に加えないと、たまたま一致した
         瞬間に、後から呼ばれた側が先のコーパスの結果をそのまま受け取ってしまう。
         """
+        # 構築は単一のロックの下で走る（この規模では許容）。revision() をロックの
+        # 外で読むため、読んだ直後に書き込まれても余分な再構築が起きるだけで済む。
         db_path = self._db_path(corpus)
         collection = self.collection(corpus)
         key = (db_path, collection.revision())
