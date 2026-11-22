@@ -212,30 +212,116 @@ def test_key_cell_does_not_tell_user_to_put_key_in_env_file(monkeypatch, capsys)
     assert ".env" not in capsys.readouterr().out
 
 
-def test_ngrok_cell_does_not_tell_user_to_put_url_in_env_file(monkeypatch, capsys):
+class SecretNotFoundError(Exception):
+    """google.colab.userdata.SecretNotFoundError の代わり。"""
+
+
+class NotebookAccessError(Exception):
+    """google.colab.userdata.NotebookAccessError の代わり（シークレットへのアクセス未許可）。"""
+
+
+def _run_ngrok_cell(monkeypatch, *, secret, typed="typed-token", calls=None):
+    """ngrok セルを偽の pyngrok / getpass / google.colab.userdata で実行し、呼び出し記録を返す。
+
+    secret が例外なら userdata.get がそれを送出し、文字列ならその値を返す。
+    セルが例外で止まる場合に備え、記録先の calls を外から渡せる。
+    """
+    calls = {"events": [], "prompts": []} if calls is None else calls
+    calls.setdefault("events", [])
+    calls.setdefault("prompts", [])
+    config = types.SimpleNamespace(auth_token=None)
+
     pyngrok = types.ModuleType("pyngrok")
     conf = types.ModuleType("pyngrok.conf")
-    conf.get_default = lambda: types.SimpleNamespace(auth_token=None)
+    conf.get_default = lambda: config
     ngrok = types.ModuleType("pyngrok.ngrok")
-    ngrok.connect = lambda port, proto: types.SimpleNamespace(
-        public_url="https://example.ngrok-free.app"
-    )
+    ngrok.kill = lambda: calls["events"].append("kill")
+
+    def connect(port, proto):
+        calls["events"].append(("connect", port, proto, config.auth_token))
+        return types.SimpleNamespace(public_url="https://example.ngrok-free.app")
+
+    ngrok.connect = connect
     pyngrok.conf, pyngrok.ngrok = conf, ngrok
+
     getpass = types.ModuleType("getpass")
-    getpass.getpass = lambda prompt: "token"
+
+    def fake_getpass(prompt):
+        calls["prompts"].append(prompt)
+        return typed
+
+    getpass.getpass = fake_getpass
+
+    userdata = types.ModuleType("google.colab.userdata")
+    userdata.SecretNotFoundError = SecretNotFoundError
+    userdata.NotebookAccessError = NotebookAccessError
+
+    def get(name):
+        assert name == "NGROK_AUTHTOKEN"
+        if isinstance(secret, Exception):
+            raise secret
+        return secret
+
+    userdata.get = get
+    google = types.ModuleType("google")
+    colab = types.ModuleType("google.colab")
+    colab.userdata = userdata
+    google.colab = colab
+
     for name, module in {
         "pyngrok": pyngrok,
         "pyngrok.conf": conf,
         "pyngrok.ngrok": ngrok,
         "getpass": getpass,
+        "google": google,
+        "google.colab": colab,
+        "google.colab.userdata": userdata,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
 
-    exec(compile(_code_cell("# 7."), "ngrok-cell", "exec"), _settings())
+    settings = _settings()
+    exec(compile(_code_cell("# 7."), "ngrok-cell", "exec"), settings)
+    calls["port"] = settings["PROXY_PORT"]
+    return calls
+
+
+def test_ngrok_cell_does_not_tell_user_to_put_url_in_env_file(monkeypatch, capsys):
+    _run_ngrok_cell(monkeypatch, secret="secret-token")
 
     out = capsys.readouterr().out
     assert "https://example.ngrok-free.app" in out
     assert ".env" not in out
+    assert "OLLAMA_HOST" not in out
+
+
+def test_ngrok_cell_uses_colab_secret_without_prompting(monkeypatch):
+    calls = _run_ngrok_cell(monkeypatch, secret="  secret-token\n")
+
+    assert calls["prompts"] == []
+    # 再実行で前のトンネルが残らないよう、張る前に閉じる
+    assert calls["events"] == ["kill", ("connect", calls["port"], "http", "secret-token")]
+
+
+@pytest.mark.parametrize(
+    "secret", [SecretNotFoundError("missing"), NotebookAccessError("denied"), ""]
+)
+def test_ngrok_cell_falls_back_to_prompt_when_secret_unavailable(monkeypatch, secret):
+    calls = _run_ngrok_cell(monkeypatch, secret=secret, typed=" typed-token ")
+
+    assert len(calls["prompts"]) == 1
+    assert calls["events"][-1] == ("connect", calls["port"], "http", "typed-token")
+
+
+def test_ngrok_cell_does_not_hide_unexpected_secret_errors(monkeypatch):
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_ngrok_cell(monkeypatch, secret=RuntimeError("boom"))
+
+
+def test_ngrok_cell_rejects_empty_token_before_connecting(monkeypatch):
+    calls = {}
+    with pytest.raises(ValueError, match="authtoken"):
+        _run_ngrok_cell(monkeypatch, secret="", typed="   ", calls=calls)
+    assert not any(event[0] == "connect" for event in calls["events"] if isinstance(event, tuple))
 
 
 def test_vllm_restart_terminates_previous_process(tmp_path, monkeypatch):
