@@ -314,3 +314,101 @@ def test_proxy_maps_upstream_connection_and_timeout_errors(tmp_path, monkeypatch
     assert timeout.body == {"error": "vLLM upstream timed out"}
     assert connection.status_code == 502
     assert connection.body == {"error": "Unable to reach vLLM upstream"}
+
+
+def _sse(payload):
+    return "data: " + json.dumps(payload, ensure_ascii=False)
+
+
+def _delta(**fields):
+    return _sse({"choices": [{"index": 0, "delta": fields}]})
+
+
+def _run_speed_cell(monkeypatch, lines, *, http_error=None):
+    """偽の requests.post（SSE行を返す）と、呼ぶたびに0.5秒進む時計でセル8を実行する。"""
+    calls = []
+
+    class HTTPError(Exception):
+        pass
+
+    class Response:
+        def raise_for_status(self):
+            if http_error is not None:
+                raise HTTPError(http_error)
+
+        def iter_lines(self, decode_unicode=False):
+            assert decode_unicode is True
+            yield from lines
+
+    fake_requests = types.ModuleType("requests")
+    fake_requests.HTTPError = HTTPError
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    fake_requests.post = post
+
+    clock = {"now": 100.0}
+
+    def perf_counter():
+        clock["now"] += 0.5
+        return clock["now"]
+
+    fake_time = types.ModuleType("time")
+    fake_time.perf_counter = perf_counter
+
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setitem(sys.modules, "time", fake_time)
+
+    namespace = _settings()
+    namespace["PROXY_API_KEY"] = "test-runtime-key"
+    exec(compile(_code_cell("# 8."), "speed-check-cell", "exec"), namespace)
+    return namespace, calls
+
+
+def test_measure_chat_reports_reasoning_content_and_speed(monkeypatch, capsys):
+    lines = [
+        _delta(role="assistant"),
+        "",
+        _delta(reasoning="首都を"),
+        _delta(reasoning="答える。"),
+        _delta(content="東京"),
+        _delta(content="です。"),
+        _sse({"choices": [], "usage": {"completion_tokens": 40}}),
+        "data: [DONE]",
+    ]
+    namespace, calls = _run_speed_cell(monkeypatch, lines)
+    result = namespace["speed_result"]
+
+    url, kwargs = calls[0]
+    assert url == "http://127.0.0.1:8000/v1/chat/completions"
+    assert kwargs["headers"] == {"X-API-Key": "test-runtime-key"}
+    assert kwargs["json"]["model"] == "openai/gpt-oss-20b"
+    assert kwargs["json"]["stream"] is True
+    assert kwargs["json"]["stream_options"] == {"include_usage": True}
+    assert kwargs["stream"] is True
+    assert result["content"] == "東京です。"
+    assert result["reasoning_chars"] == len("首都を答える。")
+    assert result["completion_tokens"] == 40
+    assert result["first_token_seconds"] > 0
+    assert result["total_seconds"] >= result["first_token_seconds"]
+    assert result["tokens_per_second"] == pytest.approx(40 / result["total_seconds"])
+    assert "東京です。" in capsys.readouterr().out
+
+
+def test_measure_chat_flags_reasoning_only_answer(monkeypatch, capsys):
+    lines = [
+        _delta(reasoning="考え中"),
+        _sse({"choices": [], "usage": {"completion_tokens": 1024}}),
+        "data: [DONE]",
+    ]
+    namespace, _ = _run_speed_cell(monkeypatch, lines)
+
+    assert namespace["speed_result"]["content"] == ""
+    assert "max_tokens" in capsys.readouterr().out
+
+
+def test_measure_chat_raises_on_http_error(monkeypatch):
+    with pytest.raises(Exception, match="401 Client Error"):
+        _run_speed_cell(monkeypatch, [], http_error="401 Client Error: Unauthorized")
