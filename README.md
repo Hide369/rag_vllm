@@ -263,6 +263,35 @@ BM25に床（フロア）を設けない判断（`ingest/retrieval.py`）が以�
 `.exe` を使えるようにしたい場合は該当パッケージを
 `python.exe -m pip install --force-reinstall --no-deps <package>` で入れ直す。）
 
+## 新しい画面（移行中・開発機で試用）
+
+Streamlit の画面から FastAPI 製の画面（`rag_web/`）へ移行している。**本番の画面は
+段階3まで Streamlit のままで**、新しい画面は開発機で試すためのものである。上の
+Streamlit の手順は変わらない。
+
+管理者パスワードのハッシュを作る（平文のパスワードは `.env` に置かない）。
+
+```powershell
+.\rag_env\Scripts\python.exe -m rag_web.password
+```
+
+表示された `RAG_WEB_ADMIN_PASSWORD_HASH=...` の行を `.env` に追記する。ほかの
+`RAG_WEB_*`（ホスト・ポート・アップロード上限・セッション時間・Cookie の Secure）は
+任意で、項目と既定値は `.env.example` にある。
+
+```powershell
+.\run_web.ps1
+# 仮想環境を直接使うなら
+.\rag_env\Scripts\python.exe -m rag_web
+```
+
+`run_web.ps1` は8502番を掴んだままの古いプロセスを止めてから起動する。ブラウザーで
+<http://127.0.0.1:8502> を開く。ハッシュが無い・壊れているときは「エラー: …」を出して
+起動しない。
+
+管理者ログインが要るのは差分取り込みだけである。チャットと資料の閲覧は
+ログインなしで使える。
+
 ## 技術ドキュメントの取り込み
 
 公式ドキュメントを取り込み、モデルの古い知識ではなく取り込んだ記法で
