@@ -21,7 +21,7 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from ingest import store
 from ingest.embedder import EmbeddingError
@@ -43,9 +43,12 @@ CSRF_VALUE = "rag-web"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 VENDOR_DIR = STATIC_DIR / "vendor"
 
+# 回答生成に使うモデル。画面からは選ばせない（接続先の Ollama に置いてある生成モデルが
+# これ1つだけで、選択肢を出しても利用者に選ぶ意味がないため）。変えるときはここを直す。
+CHAT_MODEL = "gpt-oss:20b"
+
 # 段階③で Streamlit 版（rag_chat_app.py）を消すまでの一時的な重複。値は同じに保つ
 # （tests/test_web_app.py が一致を確かめる）。
-MODELS = ["gpt-oss:20b"]
 DOCS_INGEST_COMMAND = (
     "python -m scripts.fetch_docs のあと "
     "python -m scripts.ingest_source --source-dir docs_source "
@@ -84,19 +87,11 @@ class Message(BaseModel):
 
 class ChatBody(BaseModel):
     corpus: Corpus
-    model: str
     temperature: float = Field(ge=0, le=1)
     # 上限は履歴1件と同じ。Streamlit 版には上限が無く、長い資料を貼って尋ねる使い方を
     # 狭めないため、異常に大きい入力だけを弾く値にしている。
     question: str = Field(min_length=1, max_length=100_000)
     history: list[Message] = Field(max_length=100)
-
-    @field_validator("model")
-    @classmethod
-    def _known_model(cls, value: str) -> str:
-        if value not in MODELS:
-            raise ValueError(f"使えないモデルです: {value}")
-        return value
 
 
 class UploadItem(BaseModel):
@@ -281,7 +276,6 @@ def create_app(
     @app.get("/api/status")
     def status(corpus: Corpus = INTERNAL) -> dict:
         return {
-            "models": MODELS,
             "corpus": corpus,
             "chunk_count": corpora.collection(corpus).count(),
             "source_dir_name": services.source_dir.name,
@@ -294,7 +288,7 @@ def create_app(
     def chat(body: ChatBody) -> StreamingResponse:
         request = ChatRequest(
             corpus=body.corpus,
-            model=body.model,
+            model=CHAT_MODEL,
             temperature=body.temperature,
             question=body.question,
             history=[message.model_dump() for message in body.history],
