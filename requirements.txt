@@ -37,3 +37,9 @@ pillow==12.3.0
 
 # コーディングエージェント向けMCPサーバ
 mcp==2.2.0
+
+# FastAPI版Web UI（rag_web/）。fastapi 0.165.0 は公開から2週間未満のため、
+# 公開から十分経った 0.162.2 に固定する
+fastapi==0.162.2
+uvicorn==0.54.0
+httpx==0.28.1
