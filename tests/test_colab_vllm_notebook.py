@@ -159,6 +159,85 @@ def test_vllm_crash_fails_fast_with_log_tail(tmp_path, monkeypatch, capsys):
     assert "CUDA out of memory" in capsys.readouterr().out
 
 
+def test_vllm_crash_shows_root_cause_buried_above_long_traceback(tmp_path, monkeypatch, capsys):
+    # V1エンジンでは子プロセスの原因の後に、APIサーバー側の長いトレースバックが続く
+    log_text = (
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n"
+        + "  File \"/content/vllm-env/lib/python3.12/site-packages/vllm/x.py\", line 1\n" * 100
+        + "RuntimeError: Engine core initialization failed. See root cause above.\n"
+    )
+    _install_process_fakes(
+        monkeypatch, process=FakeProcess(returncode=1), models_status=None, log_text=log_text
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(RuntimeError):
+        exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), _settings())
+
+    assert "CUDA out of memory" in capsys.readouterr().out
+
+
+def test_vllm_runs_inside_its_venv(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    calls = _install_process_fakes(monkeypatch, process=FakeProcess())
+
+    exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), _settings())
+
+    _, kwargs = calls["popen"][0]
+    assert kwargs["env"]["VIRTUAL_ENV"] == "/content/vllm-env"
+    assert kwargs["env"]["PATH"].startswith("/content/vllm-env/bin:")
+
+
+def test_install_seeds_pip_and_downloads_kernels_inside_venv(monkeypatch):
+    runs = []
+    fake_subprocess = types.ModuleType("subprocess")
+    fake_subprocess.run = lambda args, **kwargs: runs.append((args, kwargs))
+    monkeypatch.setitem(sys.modules, "subprocess", fake_subprocess)
+
+    exec(compile(_code_cell("# 2."), "install-cell", "exec"), _settings())
+
+    venv_args = next(args for args, _ in runs if args[:2] == ["uv", "venv"])
+    assert "--seed" in venv_args
+    _, kernel_kwargs = next(
+        (args, kwargs) for args, kwargs in runs if "download-kernels" in args
+    )
+    assert kernel_kwargs["env"]["VIRTUAL_ENV"] == "/content/vllm-env"
+    assert kernel_kwargs["check"] is True
+
+
+def test_key_cell_does_not_tell_user_to_put_key_in_env_file(monkeypatch, capsys):
+    monkeypatch.delenv("PROXY_API_KEY", raising=False)
+    exec(compile(_code_cell("# 4."), "proxy-key-cell", "exec"), _settings())
+    assert ".env" not in capsys.readouterr().out
+
+
+def test_ngrok_cell_does_not_tell_user_to_put_url_in_env_file(monkeypatch, capsys):
+    pyngrok = types.ModuleType("pyngrok")
+    conf = types.ModuleType("pyngrok.conf")
+    conf.get_default = lambda: types.SimpleNamespace(auth_token=None)
+    ngrok = types.ModuleType("pyngrok.ngrok")
+    ngrok.connect = lambda port, proto: types.SimpleNamespace(
+        public_url="https://example.ngrok-free.app"
+    )
+    pyngrok.conf, pyngrok.ngrok = conf, ngrok
+    getpass = types.ModuleType("getpass")
+    getpass.getpass = lambda prompt: "token"
+    for name, module in {
+        "pyngrok": pyngrok,
+        "pyngrok.conf": conf,
+        "pyngrok.ngrok": ngrok,
+        "getpass": getpass,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    exec(compile(_code_cell("# 7."), "ngrok-cell", "exec"), _settings())
+
+    out = capsys.readouterr().out
+    assert "https://example.ngrok-free.app" in out
+    assert ".env" not in out
+
+
 def test_vllm_restart_terminates_previous_process(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _install_process_fakes(monkeypatch, process=FakeProcess())
@@ -393,7 +472,9 @@ def test_measure_chat_reports_reasoning_content_and_speed(monkeypatch, capsys):
     assert result["completion_tokens"] == 40
     assert result["first_token_seconds"] > 0
     assert result["total_seconds"] >= result["first_token_seconds"]
-    assert result["tokens_per_second"] == pytest.approx(40 / result["total_seconds"])
+    # Ollamaの eval rate と比べられるよう、初トークンまでの待ちを除いた生成速度にする
+    decode_seconds = result["total_seconds"] - result["first_token_seconds"]
+    assert result["decode_tokens_per_second"] == pytest.approx(40 / decode_seconds)
     assert "東京です。" in capsys.readouterr().out
 
 
