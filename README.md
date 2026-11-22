@@ -426,6 +426,21 @@ Ollamaに肩代わりさせられる。現在Colab側に置いているのは `g
 - ローカルのOllamaに戻すには、`.env` の `OLLAMA_HOST` / `OLLAMA_API_KEY` を削除するか
   コメントアウトすればよい（既定値の `http://127.0.0.1:11434` に戻る）。
 
+### ColabのL4でvLLMを試す
+
+このリポジトリ（`rag_vllm`）は、RAGをOllamaからvLLMへ移すためにOllama版
+（`Hide369/local-llm-rag`）から複製したものである。その第一歩として
+[colab/run_vllm_server.ipynb](colab/run_vllm_server.ipynb) で、L4上のvLLMに
+`openai/gpt-oss-20b` を立て、同じ認証プロキシ + ngrok の構成で OpenAI 互換API
+（`/v1/chat/completions` など）を手元から叩ける。ノートブック内に応答時間を計るセルと、
+PowerShell からの呼び出し例がある。
+
+- **RAGアプリはまだ動かない**: `rag_chat_app.py` と `ingest/` はOllamaのネイティブAPI
+  （`/api/chat`・`/api/embed`・`/api/tags`）を使うため、このURLを `.env` に入れても
+  回答生成・埋め込みは失敗する。RAG側の切り替えは今後の作業である。
+- 埋め込み（bge-m3）とVLM（qwen3-vl）はこのノートブックでは立てていない。
+- 設計: [docs/superpowers/specs/2026-11-22-vllm-colab-notebook-design.md](docs/superpowers/specs/2026-11-22-vllm-colab-notebook-design.md)
+
 ## GB10サーバーにvLLMを立てる
 
 **RAG本体への導入は2026-09-16に見送った。検索と生成はOllamaのまま運用する。**
