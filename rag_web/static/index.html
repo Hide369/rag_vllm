@@ -42,7 +42,7 @@
   h3 { margin: 0 0 8px; font-size: 14px; }
   label { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; }
   .field { margin-bottom: 12px; }
-  .field > .label { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 2px; }
+  .field > .label, label.label { display: block; color: var(--muted); font-size: 12.5px; margin: 0 0 2px; }
   .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 6px; margin-bottom: 10px; }
   input[type=password], input[type=text], select, textarea {
     font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
@@ -107,9 +107,28 @@
   .hit .caption { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
   .hit .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
   .evidence pre { white-space: pre; }
-  #chat-form { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0;
-               background: var(--panel); padding-top: 8px; }
+  #chat-form { display: grid; gap: 6px; position: sticky; bottom: 0; background: var(--panel); padding-top: 8px; }
+  .input-row { display: flex; gap: 8px; align-items: flex-end; }
   #question { flex: 1; min-width: 0; resize: vertical; min-height: 42px; }
+  /* チャット / Cowork の切り替え（Streamlit の segmented_control） */
+  .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+               justify-self: start; margin: 0; padding: 0; }
+  .segmented label { position: relative; margin: 0; padding: 3px 14px; cursor: pointer; gap: 0; }
+  .segmented label + label { border-left: 1px solid var(--border); }
+  .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+  .segmented label:has(input:checked) { background: var(--accent); color: var(--accent-text); }
+  .segmented label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .segmented label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+
+  /* Cowork */
+  #cowork-panel { border-top: 1px solid var(--border); padding-top: 12px; }
+  .cowork-template-row { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 8px; align-items: end; }
+  @media (max-width: 600px) { .cowork-template-row { grid-template-columns: minmax(0, 1fr); } }
+  #cowork-pasted { width: 100%; resize: vertical; }
+  #cowork-files, #template-files { max-width: 100%; }
+  .source-kind { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .download-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  details.evidence .warning-text { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
   dialog { border: 1px solid var(--border); border-radius: 10px; padding: 0; width: min(640px, calc(100vw - 32px));
            background: var(--panel); color: var(--text); }
@@ -118,7 +137,7 @@
   .dlg-head { border-bottom: 1px solid var(--border); }
   .dlg-foot { border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
   #upload-files { max-width: 100%; }
-  #upload-list { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  #upload-list, #template-list { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
   .upload-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px;
                  border-bottom: 1px solid var(--border); }
   .upload-item:last-child { border-bottom: none; }
@@ -197,9 +216,45 @@
     <div id="messages" aria-live="polite">
       <p id="empty-chat" class="muted">メッセージを入力して質問してください。</p>
     </div>
+    <!-- Cowork（文書生成）。依頼文は下のチャットの入力欄から送る。選択肢は /api/cowork/options から埋める -->
+    <div id="cowork-panel" class="hidden">
+      <div class="cowork-template-row field">
+        <div>
+          <label class="label" for="cowork-template">フォーマットファイル</label>
+          <select id="cowork-template"></select>
+        </div>
+        <button id="open-templates" type="button">フォーマットファイルを登録・削除</button>
+      </div>
+      <div id="cowork-output-wrap" class="field">
+        <label class="label" for="cowork-output-suffix">出力形式</label>
+        <select id="cowork-output-suffix"></select>
+      </div>
+      <div class="field">
+        <label><input id="cowork-internal" type="checkbox" checked> 社内資料を参照</label>
+        <label><input id="cowork-docs" type="checkbox"> 技術ドキュメントを参照</label>
+      </div>
+      <div class="field">
+        <label class="label" for="cowork-files">添付（この回だけ使い、DBには入れません）</label>
+        <input id="cowork-files" type="file" multiple>
+      </div>
+      <div class="field">
+        <label class="label" for="cowork-pasted">テキストを貼り付け（この回だけ使い、DBには入れません）</label>
+        <textarea id="cowork-pasted" rows="4"></textarea>
+      </div>
+      <div id="cowork-options-error" class="msg error"></div>
+      <div id="cowork-progress" class="msg progress"></div>
+      <div id="cowork-error" class="msg error"></div>
+      <div id="cowork-result" aria-live="polite"></div>
+    </div>
     <form id="chat-form">
-      <textarea id="question" rows="2" placeholder="メッセージを入力" aria-label="メッセージを入力" required></textarea>
-      <button id="send" class="primary" type="submit">送信</button>
+      <fieldset class="segmented" aria-label="モード">
+        <label><input id="mode-chat" type="radio" name="mode" value="chat" checked>チャット</label>
+        <label><input id="mode-cowork" type="radio" name="mode" value="cowork">Cowork</label>
+      </fieldset>
+      <div class="input-row">
+        <textarea id="question" rows="2" placeholder="メッセージを入力" aria-label="メッセージを入力" required></textarea>
+        <button id="send" class="primary" type="submit">送信</button>
+      </div>
     </form>
   </section>
 </main>
@@ -227,6 +282,30 @@
   </div>
   <div class="dlg-foot">
     <button id="close-upload" type="button">閉じる</button>
+  </div>
+</dialog>
+
+<dialog id="template-dialog">
+  <div class="dlg-head"><h2 style="margin:0">フォーマットファイルを登録・削除する</h2></div>
+  <div class="dlg-body">
+    <p id="template-caption" class="muted small" style="margin-top:0"></p>
+    <div class="field">
+      <label class="label" for="template-files">フォーマットファイル</label>
+      <input id="template-files" type="file" multiple>
+    </div>
+    <div class="row">
+      <button id="run-template-register" class="primary" type="button">登録する</button>
+    </div>
+    <div id="template-notice" class="msg warning"></div>
+    <div id="template-report" class="msg success"></div>
+    <div id="template-error" class="msg error"></div>
+    <div id="template-list-wrap" class="hidden">
+      <hr>
+      <div id="template-list"></div>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <button id="close-templates" type="button">閉じる</button>
   </div>
 </dialog>
 

@@ -4,7 +4,8 @@
 - 社内資料の差分取り込み（POST /api/ingest）だけは管理者ログインが要る
 - GET 以外は X-Requested-With ヘッダーを必須にする（CSRF 対策。ログインが無くても、
   別サイトのページから取り込みや削除を実行させられるのを防ぐ）
-- 取り込み・アップロード・削除は共有ロックで全利用者を通して1つずつ。取れなければ 409
+- 取り込み・アップロード・削除・フォーマットファイルの登録削除は共有ロックで全利用者を通して
+  1つずつ。取れなければ 409。Cowork（文書生成）は共有リソースを変えないのでロックを取らない
 
 Batch_Exec の godoc_agent/web/app.py の書き方に倣う。
 """
@@ -12,17 +13,20 @@ Batch_Exec の godoc_agent/web/app.py の書き方に倣う。
 import base64
 import binascii
 import json
+import logging
 import math
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from datetime import date
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+import docgen
+from docgen import templates as docgen_templates
 from ingest import store
 from ingest.embedder import EmbeddingError
 from ingest.parsers import SUPPORTED_SUFFIXES
@@ -32,9 +36,20 @@ from scripts.ingest_source import UPLOAD_PREFIX
 from .answering import ChatRequest, answer_events
 from .auth import LoginThrottle, SessionStore, validate_password_hash, verify_password
 from .corpora import CorpusCache
+from .cowork import (
+    NO_TEMPLATE_LABEL,
+    Attachment,
+    CoworkRequest,
+    generate_cowork,
+    is_source_suffix,
+    output_suffixes,
+    template_path,
+)
 from .jobs import JobStore, SharedOperationBusy
 from .services import Services, caption_image_or_reason
 from .settings import WebSettings
+
+logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "rag_web_session"
 # 状態を変える操作に必須のヘッダー。別サイトのフォームからは付けられないため、CSRF 対策になる
@@ -60,6 +75,23 @@ UPLOAD_CAPTION = (
     "不要になったら下の一覧から削除してください。"
 )
 SHARED_BUSY_MESSAGE = "ほかの人が取り込み中です。終わってからもう一度実行してください"
+TEMPLATE_CAPTION = (
+    "フォーマットファイルの空欄は {{会議名}} のように書いてください。"
+    "登録したフォーマットファイルはこのマシンの templates/ に残ります。"
+)
+NO_SUCH_TEMPLATE_MESSAGE = "そのフォーマットファイルはありません"
+TEMPLATE_IN_USE_MESSAGE = (
+    "フォーマットファイルが使用中のため削除できませんでした。"
+    "少し待ってからもう一度実行してください"
+)
+UNSUPPORTED_UPLOAD = "取り込めない種類のファイルです"
+UNSUPPORTED_ATTACHMENT = "添付できない種類のファイルです"
+UNSUPPORTED_TEMPLATE = "フォーマットファイルとして使えない形式です"
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
 
 # すべての応答に付けるヘッダー。index.html の meta の CSP は frame-ancestors を
 # 扱えない（meta では無視される）ため、埋め込み禁止はヘッダーで送る。
@@ -103,8 +135,33 @@ class UploadBody(BaseModel):
     files: list[UploadItem] = Field(min_length=1, max_length=50)
 
 
-def _check_upload_name(name: str) -> None:
-    """一時フォルダの外へ書かせない。ファイル名1つ分だけを受け付ける。
+class CoworkBody(BaseModel):
+    question: str = Field(min_length=1, max_length=100_000)
+    # 登録済みのフォーマットファイルの名前。None は雛形なし。
+    template: str | None = Field(default=None, max_length=255)
+    output_suffix: str
+    use_internal: bool
+    use_docs: bool
+    pasted: str = Field(default="", max_length=100_000)
+    attachments: list[UploadItem] = Field(default_factory=list, max_length=20)
+
+    @field_validator("output_suffix")
+    @classmethod
+    def _known_output_suffix(cls, value: str) -> str:
+        if value not in output_suffixes():
+            raise ValueError(f"選べない出力形式です: {value}")
+        return value
+
+
+class TemplateUploadBody(BaseModel):
+    files: list[UploadItem] = Field(min_length=1, max_length=20)
+
+
+def _check_file_name(name: str) -> None:
+    """一時フォルダや templates/ の外を指させない。ファイル名1つ分だけを受け付ける。
+
+    ".." は「v1..2.md」のように名前の一部なら外へ出られないので通す。拒むのは
+    「.」「..」という名前そのものだけである（区切りは下で別に拒む）。
 
     Path(name).name との比較だけでは、実行環境の OS が区切りとみなさない文字
     （Linux での \\）を通してしまうため、区切り文字も明示的に拒む。
@@ -114,19 +171,43 @@ def _check_upload_name(name: str) -> None:
         or Path(name).name != name
         or "/" in name
         or "\\" in name
-        or ".." in name
+        or name in (".", "..")
     ):
         raise HTTPException(400, f"ファイル名にパスは含められません: {name}")
-    if Path(name).suffix.lower() not in SUPPORTED_SUFFIXES:
-        raise HTTPException(400, f"取り込めない種類のファイルです: {name}")
+    # Windows では次の名前が別物になる。":" は代替データストリーム（"ab:y.md" は
+    # 拡張子の無い "ab" を作り、"議事録.md:x.md" は既存の雛形にストリームを足す）、
+    # 末尾の "." と空白は黙って落とされ、予約デバイス名は実ファイルにならない。
+    # どれも一覧に出ず消せないファイルや、意図しない書き込み先を生むため拒む。
+    if (
+        ":" in name
+        or any(ord(char) < 32 for char in name)
+        or name.endswith((".", " "))
+        or name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES
+    ):
+        raise HTTPException(400, f"ファイル名に使えない文字か名前です: {name}")
 
 
-def _decode_uploads(files: list[UploadItem], max_bytes: int) -> list[tuple[str, bytes]]:
+def _check_upload_name(
+    name: str,
+    suffixes: Collection[str] = SUPPORTED_SUFFIXES,
+    unsupported: str = UNSUPPORTED_UPLOAD,
+) -> None:
+    _check_file_name(name)
+    if Path(name).suffix.lower() not in suffixes:
+        raise HTTPException(400, f"{unsupported}: {name}")
+
+
+def _decode_uploads(
+    files: list[UploadItem],
+    max_bytes: int,
+    suffixes: Collection[str] = SUPPORTED_SUFFIXES,
+    unsupported: str = UNSUPPORTED_UPLOAD,
+) -> list[tuple[str, bytes]]:
     seen: set[str] = set()
     decoded: list[tuple[str, bytes]] = []
     total = 0
     for file in files:
-        _check_upload_name(file.name)
+        _check_upload_name(file.name, suffixes, unsupported)
         # 同じ名前は一時フォルダで上書きされ、黙って1つが消える。Windows は
         # 大文字小文字を区別しないため、A.txt と a.txt も同じ名前として扱う。
         folded = file.name.casefold()
@@ -145,6 +226,33 @@ def _decode_uploads(files: list[UploadItem], max_bytes: int) -> list[tuple[str, 
             )
         decoded.append((file.name, content))
     return decoded
+
+
+def _partial_registration_message(
+    failed: str, error: Exception, registered: list[str]
+) -> str:
+    done = "、".join(registered) if registered else "なし"
+    return f"{failed} を登録できませんでした: {error}（登録済み: {done}）"
+
+
+def _template_items(services: Services) -> list[dict]:
+    """登録済みのフォーマットファイルと、その印（開けなければ理由）。
+
+    Cowork の選択肢と登録・削除の一覧の両方がこれを使う。印を添えるのは、
+    印が1つも無い雛形をこの場で気づけるようにするため。
+    """
+    items = []
+    for path in docgen_templates.templates(services.templates_dir):
+        try:
+            names = docgen.placeholders(path)
+        except Exception as error:
+            # templates.register は拡張子しか見ないため、中身が壊れた雛形も登録
+            # できてしまう。ここで落とすと、その雛形を消せる唯一の画面ごと出せなく
+            # なるため、理由を添えて一覧に残す（rag_chat_app.py の template_dialog と同じ）。
+            items.append({"name": path.name, "placeholders": None, "error": str(error)})
+        else:
+            items.append({"name": path.name, "placeholders": names, "error": None})
+    return items
 
 
 class SecurityHeadersMiddleware:
@@ -368,6 +476,115 @@ def create_app(
             # 空のチャンク列を渡すとその資料はDBから消える（ingest/store.py）。
             store.replace_source(collection, key, [], [])
         return {"deleted": key}
+
+    # --- Cowork（文書生成） -------------------------------------------------------------
+
+    @app.get("/api/cowork/options")
+    def cowork_options() -> dict:
+        suffixes = output_suffixes()
+        return {
+            "no_template_label": NO_TEMPLATE_LABEL,
+            "output_suffixes": suffixes,
+            "source_suffixes": [suffix for suffix in suffixes if is_source_suffix(suffix)],
+            "attachment_suffixes": sorted(SUPPORTED_SUFFIXES),
+            "template_suffixes": sorted(docgen.SUPPORTED_SUFFIXES),
+            "templates": _template_items(services),
+        }
+
+    @app.post("/api/cowork", dependencies=[Depends(require_csrf_header)])
+    def cowork(body: CoworkBody) -> dict:
+        files = _decode_uploads(
+            body.attachments, settings.max_upload_bytes,
+            SUPPORTED_SUFFIXES, UNSUPPORTED_ATTACHMENT,
+        )
+        if body.template is not None:
+            try:
+                template_path(services, body.template)
+            except FileNotFoundError as e:
+                raise HTTPException(400, NO_SUCH_TEMPLATE_MESSAGE) from e
+        request = CoworkRequest(
+            model=CHAT_MODEL,
+            question=body.question,
+            template=body.template,
+            output_suffix=body.output_suffix,
+            use_internal=body.use_internal,
+            use_docs=body.use_docs,
+            pasted=body.pasted,
+            attachments=[Attachment(name, content) for name, content in files],
+        )
+        generated_on = today()
+
+        # 技術的負債: 同時に走る Cowork ジョブの数に上限が無い。1本ごとに添付
+        # （最大 RAG_WEB_MAX_UPLOAD_MB）と生成物がメモリに載る
+        # （docs/superpowers/specs/2026-11-22-fastapi-web-ui-design.md「段階③への申し送り」）。
+        # 共有ロックは取らない。生成は共有リソースを変えず（添付はDBに入れない）、
+        # 取り込み中でも使えるようにする。生成中に雛形が消されたときは、
+        # generate_cowork がエラー結果として返す。
+        return {
+            "job_id": jobs.start(
+                lambda: generate_cowork(request, services, corpora, generated_on),
+                shared=False,
+            )
+        }
+
+    # --- フォーマットファイル -----------------------------------------------------------
+
+    @app.get("/api/templates")
+    def list_templates() -> dict:
+        return {"caption": TEMPLATE_CAPTION, "items": _template_items(services)}
+
+    @app.post("/api/templates", dependencies=[Depends(require_csrf_header)])
+    def register_templates(body: TemplateUploadBody) -> dict:
+        files = _decode_uploads(
+            body.files, settings.max_upload_bytes,
+            docgen.SUPPORTED_SUFFIXES, UNSUPPORTED_TEMPLATE,
+        )
+        # 順序は「全件の検査（_decode_uploads）→ 全件を一時フォルダへ書く → 全件を
+        # 登録」。名前・拡張子・サイズ・base64 の誤りは templates/ に触れる前に断る。
+        # それでも登録の途中で失敗したら（ディスクの異常など）、そこまでに登録した
+        # ものは残るため、黙らずに応答で伝える。
+        with jobs.shared_operation():
+            with tempfile.TemporaryDirectory() as workspace:
+                paths = []
+                for name, content in files:
+                    path = Path(workspace) / name
+                    path.write_bytes(content)
+                    paths.append(path)
+                registered: list[str] = []
+                for path in paths:
+                    try:
+                        docgen_templates.register(path, directory=services.templates_dir)
+                    except (ValueError, docgen.UnsupportedTemplateError, OSError) as e:
+                        # ValueError 等は上の検査で通常は来ない。docgen 側の検査も 400 にする。
+                        status = 500 if isinstance(e, OSError) else 400
+                        raise HTTPException(
+                            status, _partial_registration_message(path.name, e, registered)
+                        ) from e
+                    registered.append(path.name)
+        return {"registered": len(registered)}
+
+    @app.delete("/api/templates/{name:path}", dependencies=[Depends(require_csrf_header)])
+    def delete_template(name: str) -> dict:
+        # :path で受けるのは、区切りを含む名前もここへ届けて 400 で断るため
+        # （{name} だとルートに合わず 404 になり、拒んだ理由が伝わらない）。
+        _check_file_name(name)
+        with jobs.shared_operation():
+            # 存在の確認もロックの中で行う（delete_upload と同じ理由）。
+            try:
+                template_path(services, name)
+            except FileNotFoundError as e:
+                raise HTTPException(404, NO_SUCH_TEMPLATE_MESSAGE) from e
+            try:
+                docgen_templates.remove(name, directory=services.templates_dir)
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            except OSError as e:
+                # Windows では、別の要求（Cowork の生成など）が開いているファイルを
+                # 消そうとすると PermissionError になる。素の 500 にせず、待てば
+                # 通ることを伝える。
+                logger.exception("フォーマットファイルを削除できませんでした: %s", name)
+                raise HTTPException(409, TEMPLATE_IN_USE_MESSAGE) from e
+        return {"deleted": name}
 
     # --- ジョブ -------------------------------------------------------------------------
 

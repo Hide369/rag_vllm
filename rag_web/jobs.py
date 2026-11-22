@@ -112,6 +112,23 @@ class JobStore:
             job = self._jobs.get(job_id)
         return job is not None and job.finished.wait(timeout_s)
 
+    def wait_idle(self, timeout_s: float) -> bool:
+        """走っているジョブがすべて終わるまで最大 timeout_s 秒待つ。
+
+        終了処理（テストの teardown で DB 接続を閉じる前など）が、ジョブの
+        スレッドの書き込みと競合しないために使う。時間内に終われば True、
+        timeout_s を超えれば False。待っている間に新しく始まったジョブは対象外。
+        """
+        # 注入された clock は TTL 用で止まりうるため、待ちの締め切りは実時間で測る。
+        deadline = time.monotonic() + timeout_s
+        with self._jobs_lock:
+            running = [job.finished for job in self._jobs.values() if not job.finished.is_set()]
+        for finished in running:
+            # 各待ちは残り時間で区切る。全体で timeout_s を超えて待たない。
+            if not finished.wait(max(0.0, deadline - time.monotonic())):
+                return False
+        return True
+
     def get(self, job_id: str) -> dict | None:
         with self._jobs_lock:
             self._purge_expired()

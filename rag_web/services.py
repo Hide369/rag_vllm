@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ingest import chat, embedder, reranker, retrieval, store, vector_store, vlm
+from ingest import chat, embedder, parsers, reranker, retrieval, store, vector_store, vlm
 from scripts import ingest_source
 
 
@@ -22,7 +22,11 @@ def _default_db_paths() -> dict[str, str]:
 @dataclass(frozen=True)
 class Services:
     stream_chat: Callable[[str, list[dict], float], Iterator[str]] = chat.stream_chat
-    ask_json: Callable[[str, str], str] = chat.ask_json
+    # (model, prompt, num_ctx=)。文書生成だけ num_ctx を広げて呼ぶ。
+    ask_json: Callable[..., str] = chat.ask_json
+    ask_text: Callable[..., str] = chat.ask_text
+    # (path, caption_image=)。Cowork の添付から本文を取り出す。
+    parse: Callable[..., list] = parsers.parse
     # (collection, query, index=, rerank=, rerank_floor=)
     search: Callable[..., list] = retrieval.search
     build_index: Callable = retrieval.build_index
@@ -36,6 +40,8 @@ class Services:
     ingest_uploads: Callable = ingest_source.ingest_uploads
     source_dir: Path = ingest_source.DEFAULT_SOURCE_DIR
     db_paths: Mapping[str, str] = field(default_factory=_default_db_paths)
+    # None なら docgen.templates の既定（templates/）。
+    templates_dir: Path | None = None
 
 
 def caption_image_or_reason(services: Services) -> tuple[Callable | None, str | None]:

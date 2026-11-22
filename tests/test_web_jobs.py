@@ -37,6 +37,35 @@ def _blocking_work():
     return work, started, release
 
 
+def test_wait_idle_is_true_without_jobs():
+    assert JobStore().wait_idle(WAIT_S) is True
+
+
+def test_wait_idle_times_out_while_a_job_runs_and_succeeds_after_it_ends():
+    store = JobStore()
+    work, started, release = _blocking_work()
+    store.start(work, shared=False)
+    assert started.wait(WAIT_S)
+    # 走っている間は有限の待ちで False（ブロックしない）。
+    assert store.wait_idle(0.05) is False
+    release.set()
+    assert store.wait_idle(WAIT_S) is True
+
+
+def test_wait_idle_covers_every_running_job():
+    store = JobStore()
+    work1, started1, release1 = _blocking_work()
+    work2, started2, release2 = _blocking_work()
+    store.start(work1, shared=False)
+    store.start(work2, shared=False)
+    assert started1.wait(WAIT_S)
+    assert started2.wait(WAIT_S)
+    release1.set()
+    assert store.wait_idle(0.05) is False  # 2本目がまだ走っている
+    release2.set()
+    assert store.wait_idle(WAIT_S) is True
+
+
 def test_job_runs_and_result_is_returned_once():
     store = JobStore()
     work, started, release = _blocking_work()
