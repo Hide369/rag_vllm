@@ -13,6 +13,9 @@ const POLL_MAX_FAILURES = 5;
 const HISTORY_LIMIT = 100;
 // サーバーが受け付ける質問の文字数の上限（rag_web/app.py の ChatBody.question）
 const QUESTION_MAX_CHARS = 100000;
+// Cowork の添付の件数の上限（rag_web/app.py の CoworkBody.attachments）。依頼文と貼り付けの
+// 文字数の上限は QUESTION_MAX_CHARS と同じ
+const COWORK_ATTACHMENTS_MAX = 20;
 const SPINNER_MESSAGE = "取り込み中…（図表があると時間がかかります）";
 const CONNECTION_LOST = "回答を生成できませんでした: 通信が切れました";
 const MERMAID_SRC = "/vendor/mermaid-12.3.0.min.js";
@@ -78,12 +81,17 @@ async function errorMessage(res) {
 
 // チャットの入力がサーバーの検証（422）で弾かれたときの文言。pydantic の英語の
 // メッセージは利用者に見せず、どの項目が原因かだけを日本語で伝える。
-async function chatRejectedMessage(res) {
-  let fields = [];
+// 422 の応答から、弾かれた項目の名前（body の直下の欄）を取り出す
+async function rejectedFields(res) {
   try {
     const detail = (await res.json()).detail;
-    if (Array.isArray(detail)) fields = detail.map((d) => (d.loc || [])[1]);
-  } catch (_) { /* 本文が JSON でない。下の汎用の文言で伝える */ }
+    if (Array.isArray(detail)) return detail.map((d) => (d.loc || [])[1]);
+  } catch (_) { /* 本文が JSON でない。呼び出し側の汎用の文言で伝える */ }
+  return [];
+}
+
+async function chatRejectedMessage(res) {
+  const fields = await rejectedFields(res);
   if (fields.includes("question")) {
     return `質問が長すぎます（${QUESTION_MAX_CHARS.toLocaleString("ja-JP")}文字まで）。短くしてから送ってください。`;
   }
@@ -91,6 +99,17 @@ async function chatRejectedMessage(res) {
     return "会話履歴が長すぎます。「会話履歴をリセット」を押してから質問してください。";
   }
   return "入力の形式が正しくないため、質問を送れませんでした。";
+}
+
+// Cowork の依頼がサーバーの検証（422）で弾かれたときの文言。チャットと同じく pydantic の
+// 英語は見せず、原因の項目を日本語で伝える。
+async function coworkRejectedMessage(res) {
+  const fields = await rejectedFields(res);
+  const limit = QUESTION_MAX_CHARS.toLocaleString("ja-JP");
+  if (fields.includes("question")) return `依頼文が長すぎます（${limit}文字まで）。短くしてから送ってください。`;
+  if (fields.includes("pasted")) return `貼り付けたテキストが長すぎます（${limit}文字まで）。`;
+  if (fields.includes("attachments")) return `添付は${COWORK_ATTACHMENTS_MAX}件までです。`;
+  return "入力の形式が正しくないため、依頼を受け付けられませんでした。";
 }
 
 // 画面に出すエラーの文言。fetch 自体の失敗（TypeError）はブラウザーの英語の文言になるため日本語で伝える
@@ -314,7 +333,7 @@ async function loadStatus() {
   try {
     status = await api(`/api/status?corpus=${encodeURIComponent(corpus)}`);
   } catch (error) {
-    show("status-error", `状態を取得できませんでした: ${error.message}`);
+    show("status-error", `状態を取得できませんでした: ${userMessage(error)}`);
     return;
   }
   // 取りに行っている間に検索対象が切り替わったら、古い結果で上書きしない
@@ -351,7 +370,7 @@ async function loadMe() {
   try {
     state.admin = (await api("/api/me")).admin;
   } catch (error) {
-    show("auth-error", `ログイン状態を取得できませんでした: ${error.message}`);
+    show("auth-error", `ログイン状態を取得できませんでした: ${userMessage(error)}`);
   }
   applyAdmin();
 }
@@ -365,7 +384,7 @@ $("login-form").addEventListener("submit", async (event) => {
     state.admin = (await send("POST", "/api/login", { password: $("password").value })).admin;
     $("password").value = "";
   } catch (error) {
-    show("auth-error", error.message);
+    show("auth-error", userMessage(error));
   } finally {
     if (button) button.disabled = false;
   }
@@ -377,7 +396,7 @@ $("logout").addEventListener("click", async () => {
   try {
     state.admin = (await send("POST", "/api/logout")).admin;
   } catch (error) {
-    show("auth-error", error.message);
+    show("auth-error", userMessage(error));
   }
   applyAdmin();
 });
@@ -465,7 +484,7 @@ async function loadUploads() {
   try {
     data = await api("/api/uploads");
   } catch (error) {
-    show("upload-error", `アップロード済みの資料を取得できませんでした: ${error.message}`);
+    show("upload-error", `アップロード済みの資料を取得できませんでした: ${userMessage(error)}`);
     return;
   }
   show("upload-caption", data.caption);
@@ -484,7 +503,7 @@ async function deleteUpload(item, button) {
     const key = item.key.split("/").map(encodeURIComponent).join("/");
     await send("DELETE", `/api/uploads/${key}`);
   } catch (error) {
-    show("upload-error", error.message);
+    show("upload-error", userMessage(error));
     button.disabled = false;
     return;
   }
@@ -731,14 +750,21 @@ function syncOutputSuffix() {
   $("cowork-docs").checked = state.coworkOptions.source_suffixes.includes(suffix.toLowerCase());
 }
 
+let coworkOptionsSeq = 0;
+
 async function loadCoworkOptions() {
+  // モード切替と登録・削除のあとで同時に取りに行くことがある。後から始めた取得の結果だけを使い、
+  // 遅れて届いた古い一覧で新しい一覧を上書きしない
+  const seq = ++coworkOptionsSeq;
   let options;
   try {
     options = await api("/api/cowork/options");
   } catch (error) {
+    if (seq !== coworkOptionsSeq) return;
     show("cowork-options-error", `フォーマットファイルの一覧を取得できませんでした: ${userMessage(error)}`);
     return;
   }
+  if (seq !== coworkOptionsSeq) return;
   show("cowork-options-error", "");
   state.coworkOptions = options;
   // 雛形なしは値を空文字にする（雛形の名前は空にならない）。表示はサーバーのラベル
@@ -777,8 +803,10 @@ function base64ToBytes(text) {
 // （CSP の範囲で動き、大きなファイルでも URL が長くならない）。
 function downloadButton(download) {
   const button = el("button", { type: "button", className: "primary", textContent: "ダウンロード" });
+  // 復号は最初のクリックで1回だけ行い、2回目以降は同じ Blob を使う（URL はクリックごとに作って手放す）
+  let blob = null;
   button.addEventListener("click", () => {
-    const blob = new Blob([base64ToBytes(download.content_b64)], { type: "application/octet-stream" });
+    blob ??= new Blob([base64ToBytes(download.content_b64)], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const link = el("a", { href: url, download: download.file_name });
     link.hidden = true;
@@ -820,8 +848,7 @@ async function runCowork(question) {
     await loadCoworkOptions();
     return;
   }
-  // 依頼はチャット履歴に積まない（次のチャットの検索語を汚すため）。何を頼んだ結果かは結果欄に残す
-  container.append(el("p", { className: "muted small", textContent: `依頼: ${question}` }));
+  // 依頼はチャット履歴に積まない（次のチャットの検索語を汚すため）
   const files = [...$("cowork-files").files];
   await runJob("cowork", async () => {
     const body = {
@@ -833,7 +860,24 @@ async function runCowork(question) {
       pasted: $("cowork-pasted").value,
       attachments: await Promise.all(files.map(async (file) => ({ name: file.name, content_b64: await toBase64(file) }))),
     };
-    return send("POST", "/api/cowork", body);
+    // ジョブにならずに終わったら（長すぎる・添付が不正・通信断など）、依頼文を入力欄へ戻し、
+    // 直して送り直せるようにする
+    let res;
+    try {
+      res = await fetch("/api/cowork", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...CSRF },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      $("question").value = question;
+      throw error;
+    }
+    if (res.ok) return res.json();
+    $("question").value = question;
+    if (res.status === 422) throw new Error(await coworkRejectedMessage(res));
+    throw new ApiError(await errorMessage(res), res.status);
   }, (result) => renderCoworkResult(container, result), COWORK_PROGRESS);
 }
 
