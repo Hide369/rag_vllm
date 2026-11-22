@@ -58,19 +58,20 @@ class JobStore:
             raise SharedOperationBusy("別の共有操作が実行中です")
 
     def start(self, work: Callable[[], dict], *, shared: bool) -> str:
+        # ジョブ生成を先に済ませ、ロック取得後に失敗しうる処理を挟まない。
+        job_id = secrets.token_urlsafe(24)
+        job = _Job()
         # ロックはスレッド起動前に取り、busy 判定を呼び出し側で同期的に行う。
         if shared:
             self._acquire_shared()
-        job_id = secrets.token_urlsafe(24)
-        job = _Job()
-        with self._jobs_lock:
-            self._jobs[job_id] = job
         try:
+            with self._jobs_lock:
+                self._jobs[job_id] = job
             threading.Thread(
                 target=self._run, args=(job, work, shared), daemon=True
             ).start()
         except BaseException:
-            # スレッドを起動できなかった場合にロックを握ったままにしない。
+            # スレッドを起動できなかった場合にロックもジョブも残さない。
             with self._jobs_lock:
                 self._jobs.pop(job_id, None)
             if shared:
@@ -79,22 +80,34 @@ class JobStore:
         return job_id
 
     def _run(self, job: _Job, work: Callable[[], dict], shared: bool) -> None:
+        # どの経路でも終端状態を記録する（running のまま残るとクライアントが
+        # 永久にポーリングする）。SystemExit 等も failed として記録し、
+        # スレッドからは再送出しない（未処理例外の警告になるため）。
+        outcome: tuple[str, dict | None, str | None] = (
+            "failed", None, "ジョブが異常終了しました",
+        )
         try:
-            result = work()
-            outcome = ("done", result, None)
+            outcome = ("done", work(), None)
         except Exception as e:
             logger.exception("ジョブが失敗しました")
             outcome = ("failed", None, str(e))
+        except BaseException as e:
+            logger.exception("ジョブが例外で中断されました")
+            outcome = ("failed", None, str(e) or type(e).__name__)
         finally:
             if shared:
                 self._shared_lock.release()
-        with self._jobs_lock:
-            job.state, job.result, job.error = outcome
-            job.finished_at = self._clock()
-        job.finished.set()
+            with self._jobs_lock:
+                job.state, job.result, job.error = outcome
+                job.finished_at = self._clock()
+            job.finished.set()
 
     def wait_finished(self, job_id: str, timeout_s: float) -> bool:
-        """ジョブの終了を最大 timeout_s 秒待つ。結果は消費しない。未知の id は False。"""
+        """ジョブの終了を最大 timeout_s 秒待つ。
+
+        結果は消費しない（get と違い取り出さない）。テストの同期や終了処理に使える。
+        未知の id は False。
+        """
         with self._jobs_lock:
             job = self._jobs.get(job_id)
         return job is not None and job.finished.wait(timeout_s)

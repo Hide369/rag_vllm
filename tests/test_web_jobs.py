@@ -1,5 +1,6 @@
 """rag_web.jobs のテスト。スレッドの同期は threading.Event と有限の待ちだけで行う。"""
 
+import logging
 import threading
 
 import pytest
@@ -61,25 +62,28 @@ def test_failed_job_reports_error():
 def test_second_shared_job_is_rejected_while_first_runs():
     store = JobStore()
     work, started, release = _blocking_work()
-    store.start(work, shared=True)
+    job_id = store.start(work, shared=True)
     assert started.wait(WAIT_S)
     assert store.shared_busy() is True
     with pytest.raises(SharedOperationBusy):
         store.start(lambda: {}, shared=True)
     release.set()
+    assert store.wait_finished(job_id, WAIT_S)
 
 
 def test_non_shared_jobs_run_concurrently():
     store = JobStore()
     work1, started1, release1 = _blocking_work()
     work2, started2, release2 = _blocking_work()
-    store.start(work1, shared=False)
-    store.start(work2, shared=False)
+    job1 = store.start(work1, shared=False)
+    job2 = store.start(work2, shared=False)
     assert started1.wait(WAIT_S)
     assert started2.wait(WAIT_S)
     assert store.shared_busy() is False
     release1.set()
     release2.set()
+    assert store.wait_finished(job1, WAIT_S)
+    assert store.wait_finished(job2, WAIT_S)
 
 
 def test_shared_lock_released_after_failed_job():
@@ -136,12 +140,13 @@ def test_job_ids_are_unguessable():
 def test_shared_operation_rejected_while_shared_job_runs():
     store = JobStore()
     work, started, release = _blocking_work()
-    store.start(work, shared=True)
+    job_id = store.start(work, shared=True)
     assert started.wait(WAIT_S)
     with pytest.raises(SharedOperationBusy):
         with store.shared_operation():
             pytest.fail("ロックが取れてはいけない")
     release.set()
+    assert store.wait_finished(job_id, WAIT_S)
 
 
 def test_start_shared_rejected_while_shared_operation_held():
@@ -161,3 +166,43 @@ def test_shared_operation_released_after_exception():
     assert store.shared_busy() is False
     with store.shared_operation():
         pass
+
+
+class _Abort(SystemExit):
+    """Exception ではない BaseException の代用。"""
+
+
+def test_base_exception_marks_job_failed_and_releases_lock():
+    store = JobStore()
+
+    def work():
+        raise _Abort("stop")
+
+    job_id = store.start(work, shared=True)
+    assert _wait_until_finished(store, job_id) == {"state": "failed", "error": "stop"}
+    assert store.shared_busy() is False
+
+
+def test_thread_start_failure_releases_lock_and_removes_job(monkeypatch):
+    store = JobStore()
+
+    def broken_start(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", broken_start)
+    with pytest.raises(RuntimeError):
+        store.start(lambda: {}, shared=True)
+    assert store.shared_busy() is False
+    assert store._jobs == {}
+
+
+def test_failed_job_is_logged_with_traceback(caplog):
+    store = JobStore()
+
+    def work():
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR, logger="rag_web.jobs"):
+        job_id = store.start(work, shared=False)
+        _wait_until_finished(store, job_id)
+    assert any(r.exc_info and "boom" in str(r.exc_info[1]) for r in caplog.records)
