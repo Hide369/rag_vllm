@@ -4,12 +4,16 @@ Colab の実機（L4・vLLM・ngrok）が無くても、起動引数・失敗時
 認証プロキシの振る舞いを固定するため、tests/test_colab_agent_notebook.py と
 同じくセルの本文を取り出して exec する。
 """
+import asyncio
 import json
+import os
 import sys
 import types
 from pathlib import Path
 
 import pytest
+
+from tests.notebook_proxy_fakes import install_proxy_fakes
 
 
 NOTEBOOK = Path(__file__).parents[1] / "colab" / "run_vllm_server.ipynb"
@@ -184,3 +188,129 @@ def test_notebook_has_no_saved_execution_data_or_user_metadata():
                 pending.extend(value.values())
             elif isinstance(value, list):
                 pending.extend(value)
+
+
+def _load_proxy(tmp_path, monkeypatch, upstreams):
+    """セル5で vllm_proxy.py を書き出し、偽の FastAPI/httpx の上で読み込む。"""
+    monkeypatch.chdir(tmp_path)
+    exec(compile(_code_cell("# 5."), "proxy-generator-cell", "exec"), _settings())
+    proxy_source = (tmp_path / "vllm_proxy.py").read_text(encoding="utf-8")
+    install_proxy_fakes(monkeypatch, upstreams)
+    module = types.ModuleType("vllm_proxy")
+    exec(compile(proxy_source, "vllm_proxy.py", "exec"), module.__dict__)
+    return module, proxy_source
+
+
+class _Upstream:
+    status_code = 200
+    headers = {"content-type": "text/event-stream", "connection": "keep-alive"}
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = False
+
+    async def aiter_raw(self):
+        for chunk in self.chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
+def _authorized_request(key):
+    class Request:
+        method = "POST"
+        query_params = {}
+        headers = {"x-api-key": key, "content-type": "application/json"}
+
+        async def body(self):
+            return b"{}"
+
+    return Request()
+
+
+def test_proxy_reads_key_at_runtime_and_streams_v1_routes(tmp_path, monkeypatch):
+    secret = "runtime-only-secret"
+    import secrets
+
+    monkeypatch.delenv("PROXY_API_KEY", raising=False)
+    monkeypatch.delenv("VLLM_UPSTREAM", raising=False)
+    monkeypatch.setattr(secrets, "token_urlsafe", lambda length: secret)
+    namespace = _settings()
+    exec(compile(_code_cell("# 4."), "proxy-key-cell", "exec"), namespace)
+    assert os.environ["PROXY_API_KEY"] == secret
+    assert namespace["PROXY_API_KEY"] == secret
+
+    upstream = _Upstream([b'data: {"choices":[]}\n\n', b"data: [DONE]\n\n"])
+    module, proxy_source = _load_proxy(tmp_path, monkeypatch, [upstream])
+    assert secret not in proxy_source
+    assert module._client.kwargs["base_url"] == "http://127.0.0.1:8001"
+
+    async def exercise():
+        response = await module.proxy("v1/chat/completions", _authorized_request(secret))
+        return b"".join([chunk async for chunk in response.body_iterator])
+
+    body = asyncio.run(exercise())
+    assert body == b'data: {"choices":[]}\n\ndata: [DONE]\n\n'
+    assert upstream.request.path == "/v1/chat/completions"
+    assert "x-api-key" not in {k.lower() for k, _ in upstream.request.headers}
+    assert upstream.closed is True
+
+
+def test_proxy_upstream_overridable_by_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROXY_API_KEY", "test-runtime-key")
+    monkeypatch.setenv("VLLM_UPSTREAM", "http://127.0.0.1:9999")
+    module, _ = _load_proxy(tmp_path, monkeypatch, [])
+    assert module._client.kwargs["base_url"] == "http://127.0.0.1:9999"
+
+
+def test_proxy_rejects_missing_and_invalid_keys_without_forwarding(tmp_path, monkeypatch):
+    secret = "test-runtime-key"
+    monkeypatch.setenv("PROXY_API_KEY", secret)
+    upstreams = []
+    module, _ = _load_proxy(tmp_path, monkeypatch, upstreams)
+
+    class Request:
+        method = "POST"
+        query_params = {}
+
+        def __init__(self, headers):
+            self.headers = headers
+
+        async def body(self):
+            raise AssertionError("unauthorized request body must not be read")
+
+    async def exercise():
+        return (
+            await module.proxy("v1/chat/completions", Request({})),
+            await module.proxy("v1/models", Request({"x-api-key": "incorrect-key"})),
+        )
+
+    missing, invalid = asyncio.run(exercise())
+    assert missing.status_code == invalid.status_code == 401
+    assert upstreams == []
+    assert secret not in json.dumps([missing.body, invalid.body])
+
+
+def test_proxy_maps_upstream_connection_and_timeout_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROXY_API_KEY", "test-runtime-key")
+    upstreams = []
+    module, _ = _load_proxy(tmp_path, monkeypatch, upstreams)
+    upstreams.extend(
+        [
+            module.httpx.TimeoutException("read timed out"),
+            module.httpx.RequestError("connection refused"),
+        ]
+    )
+
+    async def exercise():
+        return (
+            await module.proxy("v1/chat/completions", _authorized_request("test-runtime-key")),
+            await module.proxy("v1/models", _authorized_request("test-runtime-key")),
+        )
+
+    timeout, connection = asyncio.run(exercise())
+    assert timeout.status_code == 504
+    assert timeout.body == {"error": "vLLM upstream timed out"}
+    assert connection.status_code == 502
+    assert connection.body == {"error": "Unable to reach vLLM upstream"}
