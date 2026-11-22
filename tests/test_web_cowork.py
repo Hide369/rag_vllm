@@ -17,6 +17,7 @@ from ingest import store, vector_store
 from ingest.chat import ChatError
 from ingest.embedder import EMBED_DIM, EmbeddingError
 from ingest.models import Chunk, ParsedUnit
+from ingest.reranker import RerankError
 from ingest.retrieval import DOCS_RERANK_FLOOR, Hit
 from ingest.vlm import VlmError
 from rag_web import cowork
@@ -240,6 +241,23 @@ def test_docs_searched_with_topic_query_and_floor(recorder, services, corpora):
     # topic_query の英訳は文書生成ではないので、既定の文脈長のまま呼ぶ。
     assert recorder.ask_json_calls[0][2] is None
     assert [source["kind"] for source in result["sources"]] == ["技術ドキュメント"]
+
+
+def test_reranker_is_checked_once_per_generation_for_both_corpora(recorder, services):
+    checks = []
+
+    def failing_check():
+        checks.append(1)
+        raise RerankError("モデルが無い")
+
+    failing = replace(services, check_reranker=failing_check)
+    corpora = CorpusCache(failing)
+    _write_one(corpora.collection("docs"))
+    result = _run(_request(use_internal=True, use_docs=True), failing, corpora)
+    assert result["errors"] == []
+    assert len(recorder.search_calls) == 2
+    assert len(checks) == 1
+    assert all(call[2]["rerank"] is None for call in recorder.search_calls)
 
 
 def test_empty_docs_corpus_is_skipped_with_info(recorder, services, corpora):

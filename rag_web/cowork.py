@@ -171,6 +171,10 @@ def _collect_evidence(
     """
     question = request.question
     sources = []
+    # リランカーの確認は1回の生成で1度だけ行う。失敗は覚えず呼ぶたびに再確認する
+    # ため、コーパスごとに呼ぶと確認の失敗を二重に払うことになる（Streamlit 版も
+    # 1回の実行で1度だけ評価していた）。
+    rerank = corpora.rerank_callable() if request.use_internal or request.use_docs else None
     try:
         if request.use_internal:
             sources.append((
@@ -179,7 +183,7 @@ def _collect_evidence(
                     corpora.collection("internal"),
                     question,
                     index=corpora.index("internal"),
-                    rerank=corpora.rerank_callable(),
+                    rerank=rerank,
                 ),
             ))
         if request.use_docs:
@@ -203,7 +207,7 @@ def _collect_evidence(
                         documents,
                         english,
                         index=corpora.index("docs"),
-                        rerank=corpora.rerank_callable(),
+                        rerank=rerank,
                         rerank_floor=DOCS_RERANK_FLOOR,
                     ),
                 ))
