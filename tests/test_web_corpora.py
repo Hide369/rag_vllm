@@ -35,10 +35,19 @@ class Recorder:
     def __init__(self):
         self.open_calls = []
         self.build_calls = []
+        self.opened = []
 
     def open_store(self, path):
         self.open_calls.append(path)
-        return vector_store.open_store(path)
+        collection = vector_store.open_store(path)
+        self.opened.append(collection)
+        return collection
+
+    def close_stores(self):
+        # VectorStore には close() が無い（技術的負債）。開いた接続を閉じないと
+        # GC 時に sqlite3 の ResourceWarning が出て、-W error で落ちる。
+        for collection in self.opened:
+            collection._connection.close()
 
     def build_index(self, collection):
         self.build_calls.append(collection)
@@ -47,7 +56,9 @@ class Recorder:
 
 @pytest.fixture
 def recorder():
-    return Recorder()
+    recorder = Recorder()
+    yield recorder
+    recorder.close_stores()
 
 
 @pytest.fixture

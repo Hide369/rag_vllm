@@ -283,3 +283,23 @@ def test_messages_start_with_system_prompt_for_today(no_conditions):
     recorder = Recorder()
     _run(recorder, _request())
     assert recorder.chat_calls[0][1][0]["content"] == system_prompt(TODAY)
+
+
+def test_docs_corpus_translates_query_with_previous_question(monkeypatch):
+    # 追質問は単独では引けないため、翻訳に渡す前に直前の質問を継ぎ足す（contextual_query）。
+    def fail(*args):
+        raise AssertionError("conditions.extract が呼ばれた")
+
+    monkeypatch.setattr(answering.conditions, "extract", fail)
+    history = [
+        {"role": "user", "content": "FastAPIの依存性注入とは"},
+        {"role": "assistant", "content": "Depends を使います"},
+    ]
+    recorder = Recorder(ask_reply='{"query": "dependency injection example"}')
+    events = _run(recorder, _request(corpus="docs", question="例は？", history=history))
+    assert events[-1]["type"] == "done"
+    assert len(recorder.ask_calls) == 1
+    _, prompt = recorder.ask_calls[0]
+    assert "FastAPIの依存性注入とは" in prompt
+    assert "例は？" in prompt
+    assert recorder.search_calls[0][1] == "dependency injection example"

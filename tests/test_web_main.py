@@ -1,4 +1,8 @@
 """python -m rag_web の入口。uvicorn は偽物に差し替え、実際には起動しない。"""
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import rag_web.__main__ as web_main
@@ -42,3 +46,22 @@ def test_main_starts_uvicorn_with_settings(monkeypatch):
     assert kwargs["host"] == "0.0.0.0"
     assert kwargs["port"] == 9000
     assert app.title is not None
+
+
+def test_importing_main_does_not_import_ingest():
+    # ingest.embedder は OLLAMA_HOST をインポート時に読む。.env を読む前に取り込まれると
+    # .env の OLLAMA_HOST が効かないため、入口のインポートだけでは ingest を読まない。
+    # 同じプロセスでは他のテストが ingest を読み込み済みなので、別プロセスで確かめる。
+    code = (
+        "import sys, rag_web.__main__; "
+        "loaded = sorted(m for m in sys.modules if m == 'ingest' or m.startswith('ingest.')); "
+        "assert not loaded, loaded"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
