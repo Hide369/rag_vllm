@@ -36,14 +36,17 @@ def hash_password(password: str, *, n: int = _SCRYPT_N) -> str:
 
 def validate_password_hash(stored: str) -> None:
     """起動時に形式を確認する（壊れた値で起動し、誰もログインできない状態を避ける）。"""
+    message = "環境変数 RAG_WEB_ADMIN_PASSWORD_HASH の形式が正しくありません。rag_web.password で作り直してください"
     parts = stored.split(":")
-    if len(parts) != 6 or parts[0] != _PREFIX:
-        raise ValueError("環境変数 RAG_WEB_ADMIN_PASSWORD_HASH の形式が正しくありません。rag_web.password で作り直してください")
+    if len(parts) != 6 or parts[0] != _PREFIX or not parts[4] or not parts[5]:
+        raise ValueError(message)
     try:
-        int(parts[1]), int(parts[2]), int(parts[3])
+        # scrypt は N/r/p が正の整数でないと動かない（`scrypt:0:0:0::` のような値を弾く）
+        if min(int(parts[1]), int(parts[2]), int(parts[3])) <= 0:
+            raise ValueError("scrypt parameters must be positive")
         base64.urlsafe_b64decode(parts[4]), base64.urlsafe_b64decode(parts[5])
     except ValueError as e:
-        raise ValueError("環境変数 RAG_WEB_ADMIN_PASSWORD_HASH の形式が正しくありません。rag_web.password で作り直してください") from e
+        raise ValueError(message) from e
 
 
 def verify_password(password: str, stored: str) -> bool:

@@ -1,4 +1,4 @@
-"""管理者パスワードのハッシュを作り、.env に書く行を表示する。
+r"""管理者パスワードのハッシュを作り、.env に書く行を表示する。
 
 Batch_Exec godoc_agent/web/password.py から移植。
 
