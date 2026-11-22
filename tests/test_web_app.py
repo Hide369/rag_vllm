@@ -7,24 +7,11 @@
 import base64
 import json
 import threading
-import warnings
 from datetime import date
 from pathlib import Path
 
 import pytest
-
-with warnings.catch_warnings():
-    # starlette 1.3.1 の testclient は import 時に anyio.abc.BlockingPortal を参照し、
-    # anyio 4.16 がその別名を非推奨として警告する。ライブラリどうしの組み合わせの
-    # 問題で、このリポジトリのコードは関与しない（本番の uvicorn 経路は testclient を
-    # 読まない）。この1件だけを import の間に限って黙らせる。
-    # 技術的負債: starlette が anyio.from_thread.BlockingPortal に移ったら外す。
-    warnings.filterwarnings(
-        "ignore",
-        message=r"The anyio\.abc\.BlockingPortal alias is deprecated",
-        category=DeprecationWarning,
-    )
-    from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from ingest import store, vector_store
 from ingest.embedder import EMBED_DIM, EmbeddingError
