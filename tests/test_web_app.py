@@ -694,6 +694,31 @@ def test_index_has_no_model_picker():
     assert "モデル名" not in html
 
 
+def test_index_has_cowork_controls():
+    # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
+    # 見出し・ラベルは Streamlit 版（rag_chat_app.py）と同じ文言にする。
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "mode-chat", "mode-cowork", "cowork-panel", "cowork-template", "open-templates",
+        "cowork-output-wrap", "cowork-output-suffix", "cowork-internal", "cowork-docs",
+        "cowork-files", "cowork-pasted", "cowork-result",
+        "template-dialog", "template-caption", "template-files", "run-template-register",
+        "template-error", "template-list", "close-templates",
+    ):
+        assert f'id="{element_id}"' in html, element_id
+    for label in (
+        "フォーマットファイル", "フォーマットファイルを登録・削除", "出力形式",
+        "社内資料を参照", "技術ドキュメントを参照",
+        "添付（この回だけ使い、DBには入れません）",
+        "テキストを貼り付け（この回だけ使い、DBには入れません）",
+    ):
+        assert label in html, label
+    # 雛形なしのラベル・拡張子は /api/cowork/options から取り、画面側に写しを持たない
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert NO_TEMPLATE_LABEL not in script
+    assert "/api/cowork/options" in script
+
+
 # --- Cowork とフォーマットファイル --------------------------------------------------------
 
 TEMPLATE_CAPTION = (

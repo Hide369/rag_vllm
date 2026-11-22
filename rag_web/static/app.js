@@ -16,6 +16,14 @@ const QUESTION_MAX_CHARS = 100000;
 const SPINNER_MESSAGE = "取り込み中…（図表があると時間がかかります）";
 const CONNECTION_LOST = "回答を生成できませんでした: 通信が切れました";
 const MERMAID_SRC = "/vendor/mermaid-12.3.0.min.js";
+const COWORK_PROGRESS = "文書を生成中…";
+// 生成中に無効にする Cowork の入力
+const COWORK_INPUTS = [
+  "cowork-template", "open-templates", "cowork-output-suffix", "cowork-internal", "cowork-docs",
+  "cowork-files", "cowork-pasted",
+];
+// 生成物の object URL を手放すまでの時間。クリック直後に消すとダウンロードが始まらないブラウザーがある
+const DOWNLOAD_URL_TTL_MS = 60000;
 // 取り込める拡張子。ingest/parsers の SUPPORTED_SUFFIXES の写しで、API では返していない。
 // 食い違いは tests/test_web_app.py が検出する。
 const UPLOAD_SUFFIXES = [
@@ -38,6 +46,13 @@ const state = {
   history: [],
   generating: false,
   uploading: false,
+  // "chat" か "cowork"。Cowork の依頼は history に積まない
+  mode: "chat",
+  // /api/cowork/options の応答。拡張子・出力形式・雛形なしのラベルの唯一の出どころ
+  coworkOptions: null,
+  // 前に見た出力形式。変わった回にだけ「技術ドキュメントを参照」を切り替える
+  lastOutputSuffix: null,
+  templateBusy: false,
 };
 
 // --- 共通 ---------------------------------------------------------------------------------
@@ -76,6 +91,11 @@ async function chatRejectedMessage(res) {
     return "会話履歴が長すぎます。「会話履歴をリセット」を押してから質問してください。";
   }
   return "入力の形式が正しくないため、質問を送れませんでした。";
+}
+
+// 画面に出すエラーの文言。fetch 自体の失敗（TypeError）はブラウザーの英語の文言になるため日本語で伝える
+function userMessage(error) {
+  return error instanceof TypeError ? "通信が切れました" : error.message;
 }
 
 async function api(path, options = {}) {
@@ -384,18 +404,17 @@ async function waitJob(jobId) {
   }
 }
 
-// 取り込みの結果を4つの枠（進行中・注意・報告・エラー）へ出す
-async function runJob(prefix, start) {
-  for (const kind of ["notice", "report", "error"]) show(`${prefix}-${kind}`, "");
-  show(`${prefix}-progress`, SPINNER_MESSAGE);
+// ジョブを始めて結果を待つ。進行中は `${prefix}-progress`、失敗は `${prefix}-error` に出し、
+// 結果の描き方は render に任せる（取り込みと Cowork で結果の形が違う）。
+async function runJob(prefix, start, render, progressText = SPINNER_MESSAGE) {
+  show(`${prefix}-error`, "");
+  show(`${prefix}-progress`, progressText);
   try {
     const { job_id: jobId } = await start();
-    const result = await waitJob(jobId);
-    show(`${prefix}-notice`, result.notice);
-    show(`${prefix}-report`, result.report);
+    render(await waitJob(jobId));
     return true;
   } catch (error) {
-    show(`${prefix}-error`, error.message);
+    show(`${prefix}-error`, userMessage(error));
     // 管理者の操作が 401 なら、セッションが切れている（期限切れ・サーバーの再起動）。
     // ログイン済みの見た目のままにせず、ログイン欄へ戻す
     if (error instanceof ApiError && error.status === 401) await loadMe();
@@ -405,10 +424,19 @@ async function runJob(prefix, start) {
   }
 }
 
+// 取り込みの結果を4つの枠（進行中・注意・報告・エラー）へ出す
+function runIngestJob(prefix, start) {
+  for (const kind of ["notice", "report"]) show(`${prefix}-${kind}`, "");
+  return runJob(prefix, start, (result) => {
+    show(`${prefix}-notice`, result.notice);
+    show(`${prefix}-report`, result.report);
+  });
+}
+
 $("ingest").addEventListener("click", async () => {
   $("ingest").disabled = true;
   try {
-    await runJob("ingest", () => send("POST", "/api/ingest"));
+    await runIngestJob("ingest", () => send("POST", "/api/ingest"));
     await loadStatus();
   } finally {
     $("ingest").disabled = false;
@@ -479,7 +507,7 @@ $("run-upload").addEventListener("click", async () => {
   }
   setUploadBusy(true);
   try {
-    const ok = await runJob("upload", async () => {
+    const ok = await runIngestJob("upload", async () => {
       const body = { files: await Promise.all(files.map(async (file) => ({ name: file.name, content_b64: await toBase64(file) }))) };
       return send("POST", "/api/uploads", body);
     });
@@ -499,6 +527,9 @@ function setGenerating(generating) {
   $("send").disabled = generating;
   $("reset-history").disabled = generating;
   for (const radio of document.querySelectorAll("input[name=corpus]")) radio.disabled = generating;
+  // 生成の途中でモードや Cowork の入力を変えさせない。送った依頼と画面の選択が食い違う
+  for (const radio of document.querySelectorAll("input[name=mode]")) radio.disabled = generating;
+  for (const id of COWORK_INPUTS) $(id).disabled = generating;
 }
 
 function clearChat() {
@@ -653,7 +684,8 @@ $("chat-form").addEventListener("submit", async (event) => {
   $("question").value = "";
   setGenerating(true);
   try {
-    await ask(question);
+    if (state.mode === "cowork") await runCowork(question);
+    else await ask(question);
   } finally {
     // done / error / 通信断のどれでも必ず入力欄を戻す
     setGenerating(false);
@@ -670,6 +702,222 @@ $("question").addEventListener("keydown", (event) => {
     $("chat-form").requestSubmit();
   }
 });
+
+// --- Cowork（文書生成） ----------------------------------------------------------------------
+// rag_chat_app.py の Cowork の入力欄・render_cowork_result と同じ振る舞いにする。
+// 雛形名・印・理由・生成結果の文言はどれも信頼しない入力なので、すべて textContent で入れる。
+
+function setOptions(select, values, labelOf = (value) => value) {
+  // 選び直しの前の選択は、まだ選択肢にあれば保つ（ほかの人が雛形を登録・削除しても選び直させない）
+  const previous = select.value;
+  select.replaceChildren(...values.map((value) => el("option", { value, textContent: labelOf(value) })));
+  if (values.includes(previous)) select.value = previous;
+}
+
+// 雛形を選んだ回は出力形式を使わない。Streamlit 版と同じく先頭の形式とみなす
+function effectiveOutputSuffix() {
+  const options = state.coworkOptions;
+  return $("cowork-template").value ? options.output_suffixes[0] : $("cowork-output-suffix").value;
+}
+
+// 出力形式がソースコードなら技術ドキュメントを引く。形式が変わった回にだけ書き換え、
+// 変わらない回は利用者が自分で付け外ししたチェックを上書きしない。
+function syncOutputSuffix() {
+  if (!state.coworkOptions) return;
+  setHidden("cowork-output-wrap", Boolean($("cowork-template").value));
+  const suffix = effectiveOutputSuffix();
+  if (state.lastOutputSuffix === suffix) return;
+  state.lastOutputSuffix = suffix;
+  $("cowork-docs").checked = state.coworkOptions.source_suffixes.includes(suffix.toLowerCase());
+}
+
+async function loadCoworkOptions() {
+  let options;
+  try {
+    options = await api("/api/cowork/options");
+  } catch (error) {
+    show("cowork-options-error", `フォーマットファイルの一覧を取得できませんでした: ${userMessage(error)}`);
+    return;
+  }
+  show("cowork-options-error", "");
+  state.coworkOptions = options;
+  // 雛形なしは値を空文字にする（雛形の名前は空にならない）。表示はサーバーのラベル
+  setOptions($("cowork-template"), ["", ...options.templates.map((item) => item.name)],
+    (value) => value || options.no_template_label);
+  setOptions($("cowork-output-suffix"), options.output_suffixes);
+  $("cowork-files").accept = options.attachment_suffixes.join(",");
+  $("template-files").accept = options.template_suffixes.join(",");
+  syncOutputSuffix();
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  setHidden("cowork-panel", mode !== "cowork");
+  // 開くたびに取り直す。ほかの人が登録・削除した雛形を反映するため
+  if (mode === "cowork") loadCoworkOptions();
+}
+
+for (const radio of document.querySelectorAll("input[name=mode]")) {
+  radio.addEventListener("change", () => {
+    if (radio.checked && !state.generating) setMode(radio.value);
+  });
+}
+
+$("cowork-template").addEventListener("change", syncOutputSuffix);
+$("cowork-output-suffix").addEventListener("change", syncOutputSuffix);
+
+function base64ToBytes(text) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// 生成物をファイルとして保存させる。data: URL ではなく Blob の object URL を使う
+// （CSP の範囲で動き、大きなファイルでも URL が長くならない）。
+function downloadButton(download) {
+  const button = el("button", { type: "button", className: "primary", textContent: "ダウンロード" });
+  button.addEventListener("click", () => {
+    const blob = new Blob([base64ToBytes(download.content_b64)], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const link = el("a", { href: url, download: download.file_name });
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_TTL_MS);
+  });
+  return el("div", { className: "download-row" }, button, el("span", { className: "mono", textContent: download.file_name }));
+}
+
+function renderCoworkResult(container, result) {
+  for (const message of result.errors) container.append(el("div", { className: "msg error", textContent: message }));
+  if (result.warnings.length) {
+    // 黄色の枠で並べると生成のたびに画面が警告で埋まり、ダウンロードが下へ押し流される
+    // （rag_chat_app.py の render_cowork_result）。捨てずに畳んだ中へ普通の文で出す。
+    const details = el("details", { className: "evidence" },
+      el("summary", { textContent: `補足（${result.warnings.length}件）` }));
+    for (const message of result.warnings) details.append(el("p", { className: "warning-text", textContent: message }));
+    container.append(details);
+  }
+  for (const message of result.infos) container.append(el("div", { className: "msg info", textContent: message }));
+  if (result.download) container.append(downloadButton(result.download));
+  for (const source of result.sources) {
+    if (!source.hits.length) continue;
+    // 両方のコーパスを引いた回は一覧が2つ並ぶ。種類名が無いと見分けられない
+    container.append(el("div", { className: "source-kind", textContent: source.kind }), ...renderEvidence(source.hits));
+  }
+}
+
+async function runCowork(question) {
+  const container = $("cowork-result");
+  container.replaceChildren();
+  show("cowork-error", "");
+  if (!state.coworkOptions) {
+    // 選択肢を取れていない（サーバーが落ちていた等）。依頼文は消さずに戻す
+    $("question").value = question;
+    show("cowork-error", "フォーマットファイルの一覧を取得できていないため、生成できません。");
+    await loadCoworkOptions();
+    return;
+  }
+  // 依頼はチャット履歴に積まない（次のチャットの検索語を汚すため）。何を頼んだ結果かは結果欄に残す
+  container.append(el("p", { className: "muted small", textContent: `依頼: ${question}` }));
+  const files = [...$("cowork-files").files];
+  await runJob("cowork", async () => {
+    const body = {
+      question,
+      template: $("cowork-template").value || null,
+      output_suffix: effectiveOutputSuffix(),
+      use_internal: $("cowork-internal").checked,
+      use_docs: $("cowork-docs").checked,
+      pasted: $("cowork-pasted").value,
+      attachments: await Promise.all(files.map(async (file) => ({ name: file.name, content_b64: await toBase64(file) }))),
+    };
+    return send("POST", "/api/cowork", body);
+  }, (result) => renderCoworkResult(container, result), COWORK_PROGRESS);
+}
+
+// --- フォーマットファイルの登録・削除 ----------------------------------------------------------
+
+function setTemplateBusy(busy) {
+  state.templateBusy = busy;
+  $("run-template-register").disabled = busy;
+  for (const button of $("template-list").querySelectorAll("button")) button.disabled = busy;
+}
+
+function clearTemplateMessages() {
+  for (const kind of ["notice", "report", "error"]) show(`template-${kind}`, "");
+}
+
+function templateLabel(item) {
+  // rag_chat_app.py の template_dialog と同じ書き方。印が無ければ「なし」
+  if (item.error !== null) return `${item.name} — 開けません: ${item.error}`;
+  return `${item.name} — 印 ${item.placeholders.length}個: ${item.placeholders.join("、") || "なし"}`;
+}
+
+async function loadTemplates() {
+  let data;
+  try {
+    data = await api("/api/templates");
+  } catch (error) {
+    show("template-error", `フォーマットファイルの一覧を取得できませんでした: ${userMessage(error)}`);
+    return;
+  }
+  show("template-caption", data.caption);
+  setHidden("template-list-wrap", data.items.length === 0);
+  $("template-list").replaceChildren(...data.items.map((item) => {
+    const remove = el("button", { type: "button", className: "danger", textContent: "削除", disabled: state.templateBusy });
+    remove.addEventListener("click", () => deleteTemplate(item.name));
+    return el("div", { className: "upload-item" }, el("span", { textContent: templateLabel(item) }), remove);
+  }));
+}
+
+// 登録・削除のあとは、ダイアログの一覧と Cowork のプルダウンの両方を取り直す
+function reloadTemplates() {
+  return Promise.all([loadTemplates(), loadCoworkOptions()]);
+}
+
+async function deleteTemplate(name) {
+  clearTemplateMessages();
+  setTemplateBusy(true);
+  try {
+    await send("DELETE", `/api/templates/${encodeURIComponent(name)}`);
+  } catch (error) {
+    show("template-error", userMessage(error));
+  } finally {
+    setTemplateBusy(false);
+  }
+  await reloadTemplates();
+}
+
+$("run-template-register").addEventListener("click", async () => {
+  const files = [...$("template-files").files];
+  clearTemplateMessages();
+  if (!files.length) {
+    show("template-notice", "先にファイルを選んでください。");
+    return;
+  }
+  setTemplateBusy(true);
+  try {
+    const body = { files: await Promise.all(files.map(async (file) => ({ name: file.name, content_b64: await toBase64(file) }))) };
+    const { registered } = await send("POST", "/api/templates", body);
+    show("template-report", `${registered}件を登録しました。`);
+    $("template-files").value = "";
+  } catch (error) {
+    show("template-error", userMessage(error));
+  } finally {
+    setTemplateBusy(false);
+  }
+  await reloadTemplates();
+});
+
+$("open-templates").addEventListener("click", () => {
+  clearTemplateMessages();
+  $("template-dialog").showModal();
+  loadTemplates();
+});
+
+$("close-templates").addEventListener("click", () => $("template-dialog").close());
 
 // --- 設定欄 ----------------------------------------------------------------------------------
 
@@ -702,6 +950,7 @@ $("reset-history").addEventListener("click", () => {
 
 // ブラウザが戻る・再読み込みでラジオの選択を復元することがある。画面の表示を正とする
 state.corpus = document.querySelector("input[name=corpus]:checked")?.value || "internal";
+setMode(document.querySelector("input[name=mode]:checked")?.value || "chat");
 show("temperature-value", Number($("temperature").value).toFixed(1));
 loadMe();
 loadStatus();
