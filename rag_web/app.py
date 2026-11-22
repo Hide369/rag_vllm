@@ -13,6 +13,7 @@ Batch_Exec の godoc_agent/web/app.py の書き方に倣う。
 import base64
 import binascii
 import json
+import logging
 import math
 import tempfile
 from collections.abc import Callable, Collection, Iterator
@@ -48,6 +49,8 @@ from .jobs import JobStore, SharedOperationBusy
 from .services import Services, caption_image_or_reason
 from .settings import WebSettings
 
+logger = logging.getLogger(__name__)
+
 COOKIE_NAME = "rag_web_session"
 # 状態を変える操作に必須のヘッダー。別サイトのフォームからは付けられないため、CSRF 対策になる
 CSRF_HEADER = "X-Requested-With"
@@ -77,6 +80,10 @@ TEMPLATE_CAPTION = (
     "登録したフォーマットファイルはこのマシンの templates/ に残ります。"
 )
 NO_SUCH_TEMPLATE_MESSAGE = "そのフォーマットファイルはありません"
+TEMPLATE_IN_USE_MESSAGE = (
+    "フォーマットファイルが使用中のため削除できませんでした。"
+    "少し待ってからもう一度実行してください"
+)
 UNSUPPORTED_UPLOAD = "取り込めない種類のファイルです"
 UNSUPPORTED_ATTACHMENT = "添付できない種類のファイルです"
 UNSUPPORTED_TEMPLATE = "フォーマットファイルとして使えない形式です"
@@ -153,6 +160,9 @@ class TemplateUploadBody(BaseModel):
 def _check_file_name(name: str) -> None:
     """一時フォルダや templates/ の外を指させない。ファイル名1つ分だけを受け付ける。
 
+    ".." は「v1..2.md」のように名前の一部なら外へ出られないので通す。拒むのは
+    「.」「..」という名前そのものだけである（区切りは下で別に拒む）。
+
     Path(name).name との比較だけでは、実行環境の OS が区切りとみなさない文字
     （Linux での \\）を通してしまうため、区切り文字も明示的に拒む。
     """
@@ -161,7 +171,7 @@ def _check_file_name(name: str) -> None:
         or Path(name).name != name
         or "/" in name
         or "\\" in name
-        or ".." in name
+        or name in (".", "..")
     ):
         raise HTTPException(400, f"ファイル名にパスは含められません: {name}")
     # Windows では次の名前が別物になる。":" は代替データストリーム（"ab:y.md" は
@@ -504,6 +514,9 @@ def create_app(
         )
         generated_on = today()
 
+        # 技術的負債: 同時に走る Cowork ジョブの数に上限が無い。1本ごとに添付
+        # （最大 RAG_WEB_MAX_UPLOAD_MB）と生成物がメモリに載る
+        # （docs/superpowers/specs/2026-11-22-fastapi-web-ui-design.md「段階③への申し送り」）。
         # 共有ロックは取らない。生成は共有リソースを変えず（添付はDBに入れない）、
         # 取り込み中でも使えるようにする。生成中に雛形が消されたときは、
         # generate_cowork がエラー結果として返す。
@@ -565,6 +578,12 @@ def create_app(
                 docgen_templates.remove(name, directory=services.templates_dir)
             except ValueError as e:
                 raise HTTPException(400, str(e)) from e
+            except OSError as e:
+                # Windows では、別の要求（Cowork の生成など）が開いているファイルを
+                # 消そうとすると PermissionError になる。素の 500 にせず、待てば
+                # 通ることを伝える。
+                logger.exception("フォーマットファイルを削除できませんでした: %s", name)
+                raise HTTPException(409, TEMPLATE_IN_USE_MESSAGE) from e
         return {"deleted": name}
 
     # --- ジョブ -------------------------------------------------------------------------

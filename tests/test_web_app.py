@@ -544,12 +544,20 @@ def test_logout_revokes_session(client, fake):
 
 
 @pytest.mark.parametrize(
-    "name", ["../a.pdf", "a/b.pdf", "a\\b.pdf", "a.exe", "..", "", "noext", "a..pdf"]
+    "name", ["../a.pdf", "a/b.pdf", "a\\b.pdf", "a.exe", "..", ".", "", "noext"]
 )
 def test_upload_rejects_unsafe_names_and_suffixes(client, fake, name):
     response = client.post("/api/uploads", json=_upload_body((name, b"x")), headers=CSRF)
     assert response.status_code == 400, name
     assert fake.ingest_uploads_calls == []
+
+
+def test_upload_accepts_consecutive_dots_inside_a_name(client, fake, jobs):
+    # ".." を含むだけでは拒まない。区切りが無ければ外へは出られない。
+    response = client.post("/api/uploads", json=_upload_body(("v1..2.md", b"# v")), headers=CSRF)
+    assert response.status_code == 200, response.text
+    assert _job_result(client, jobs, response.json()["job_id"])["state"] == "done"
+    assert fake.ingest_uploads_calls == [{"v1..2.md": b"# v"}]
 
 
 def test_upload_rejects_invalid_base64_and_duplicate_names(client, fake):
@@ -833,7 +841,14 @@ def test_cowork_rejects_unknown_output_suffix_and_template(client, fake):
     assert fake.ask_text_calls == []
 
 
-@pytest.mark.parametrize("name", ["../a.pdf", "a/b.pdf", "a\\b.pdf", "a.exe", ".."])
+def test_cowork_attachment_accepts_consecutive_dots_inside_a_name(client, fake, jobs):
+    body = _cowork_body(attachments=_upload_body(("v1..2.md", b"# v"))["files"])
+    result = _cowork_result(client, jobs, body)
+    assert result["errors"] == []
+    assert fake.parse_calls == ["v1..2.md"]
+
+
+@pytest.mark.parametrize("name", ["../a.pdf", "a/b.pdf", "a\\b.pdf", "a.exe", "..", "."])
 def test_cowork_attachment_checks_match_uploads(client, fake, name):
     body = _cowork_body(attachments=_upload_body((name, b"x"))["files"])
     assert client.post("/api/cowork", json=body, headers=CSRF).status_code == 400, name
@@ -919,7 +934,17 @@ def test_template_register_and_list(client, fake):
     assert items[1] == {"name": "議事録.md", "placeholders": ["日付"], "error": None}
 
 
-@pytest.mark.parametrize("name", ["../x.md", "a/b.md", "a\\b.md", "x.exe", "..", ""])
+def test_template_register_and_delete_accept_consecutive_dots_inside_a_name(client, fake):
+    response = client.post(
+        "/api/templates", json=_upload_body(("v1..2.md", b"# {{x}}")), headers=CSRF
+    )
+    assert response.status_code == 200, response.text
+    assert [p.name for p in fake.templates_dir.iterdir()] == ["v1..2.md"]
+    assert client.delete("/api/templates/v1..2.md", headers=CSRF).status_code == 200
+    assert list(fake.templates_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["../x.md", "a/b.md", "a\\b.md", "x.exe", "..", ".", ""])
 def test_template_register_rejects_unsafe_names(client, fake, tmp_path, name):
     response = client.post(
         "/api/templates", json=_upload_body((name, b"# {{x}}")), headers=CSRF
@@ -957,6 +982,24 @@ def test_template_delete_rejects_unsafe_names(client, fake, tmp_path, encoded):
     assert response.status_code == 400, encoded
     assert outside.read_text(encoding="utf-8") == "外"
     assert (fake.templates_dir / "x.md").exists()
+
+
+def test_template_delete_in_use_returns_409_and_releases_lock(client, fake, jobs, monkeypatch):
+    # Windows では別の要求が開いているファイルを消すと PermissionError になる。
+    name = _template_file(fake)
+
+    def locked(*args, **kwargs):
+        raise PermissionError(13, "別のプロセスが使用中です")
+
+    monkeypatch.setattr("docgen.templates.remove", locked)
+    response = client.delete(f"/api/templates/{name}", headers=CSRF)
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "フォーマットファイルが使用中のため削除できませんでした。"
+        "少し待ってからもう一度実行してください"
+    )
+    assert jobs.shared_busy() is False
+    assert (fake.templates_dir / name).exists()
 
 
 def test_template_delete_unknown_returns_404(client, fake, jobs):
