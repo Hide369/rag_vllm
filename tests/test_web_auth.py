@@ -41,6 +41,19 @@ def test_validate_rejects_malformed_hash(bad):
         validate_password_hash(bad)
 
 
+def test_validate_rejects_parameters_over_scrypt_memory_limit():
+    # 形式は正しいが N=2**17 は verify_password の maxmem（64MB）を超え、二度と照合できない。
+    with pytest.raises(ValueError, match="RAG_WEB_ADMIN_PASSWORD_HASH"):
+        validate_password_hash("scrypt:131072:8:1:AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==")
+
+
+def test_validate_accepts_default_parameters():
+    # 既定の N=2**15 は上限内に収まり、そのまま照合もできる。
+    stored = hash_password(PASSWORD)
+    validate_password_hash(stored)
+    assert verify_password(PASSWORD, stored) is True
+
+
 def test_validate_rejects_non_numeric_parameters():
     with pytest.raises(ValueError, match="rag_web.password"):
         validate_password_hash("scrypt:a:8:1:AAAA:AAAA")

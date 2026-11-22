@@ -49,6 +49,13 @@ def validate_password_hash(stored: str) -> None:
     # 通しても verify_password が常に False になり、誰もログインできなくなる。
     if n < 2 or n & (n - 1) != 0 or r <= 0 or p <= 0:
         raise ValueError(message)
+    # verify_password と同じ maxmem で1回計算してみる。N や r が大きく使用メモリが
+    # 上限を超える値は、形式が正しくても verify_password が常に False になる。
+    # 必要メモリの式は OpenSSL の実装に依存するため、自前の式ではなく実際に試す。
+    try:
+        hashlib.scrypt(b"probe", salt=b"probe", n=n, r=r, p=p, maxmem=_SCRYPT_MAXMEM)
+    except (ValueError, MemoryError) as e:
+        raise ValueError(message) from e
 
 
 def verify_password(password: str, stored: str) -> bool:
