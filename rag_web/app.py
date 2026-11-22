@@ -90,7 +90,7 @@ class ChatBody(BaseModel):
 
 
 class UploadFile(BaseModel):
-    name: str
+    name: str = Field(max_length=255)
     content_b64: str
 
 
@@ -122,10 +122,12 @@ def _decode_uploads(files: list[UploadFile], max_bytes: int) -> list[tuple[str, 
     total = 0
     for file in files:
         _check_upload_name(file.name)
-        # 同じ名前は一時フォルダで上書きされ、黙って1つが消える。
-        if file.name in seen:
+        # 同じ名前は一時フォルダで上書きされ、黙って1つが消える。Windows は
+        # 大文字小文字を区別しないため、A.txt と a.txt も同じ名前として扱う。
+        folded = file.name.casefold()
+        if folded in seen:
             raise HTTPException(400, f"同じ名前のファイルが複数あります: {file.name}")
-        seen.add(file.name)
+        seen.add(folded)
         try:
             content = base64.b64decode(file.content_b64, validate=True)
         except (binascii.Error, ValueError) as e:
@@ -323,6 +325,10 @@ def create_app(
             raise HTTPException(400, "アップロードした資料だけを削除できます")
         collection = corpora.collection(INTERNAL)
         with jobs.shared_operation():
+            # 存在の確認もロックの中で行う。外で確かめると、確認と削除の間に
+            # 別の操作が割り込める。
+            if key not in store.indexed_sources(collection):
+                raise HTTPException(404, "その資料は見つかりません")
             # 空のチャンク列を渡すとその資料はDBから消える（ingest/store.py）。
             store.replace_source(collection, key, [], [])
         return {"deleted": key}

@@ -240,8 +240,12 @@ def test_post_without_csrf_header_is_rejected(client, fake):
     assert client.delete("/api/uploads/uploads/a.txt").status_code == 403
     wrong = {CSRF_HEADER: "other"}
     assert client.post("/api/chat", json=_chat_body(), headers=wrong).status_code == 403
+    # ログイン済みでもヘッダーが無ければ取り込みは走らない。
+    _login(client)
+    assert client.post("/api/ingest").status_code == 403
     assert fake.chat_calls == []
     assert fake.ingest_uploads_calls == []
+    assert fake.ingest_directory_calls == []
 
 
 def test_status_reports_counts_and_reranker_state(client, fake):
@@ -432,6 +436,16 @@ def test_upload_rejects_invalid_base64_and_duplicate_names(client, fake):
     assert client.post("/api/uploads", json=bad, headers=CSRF).status_code == 400
     duplicated = _upload_body(("a.txt", b"x"), ("a.txt", b"y"))
     assert client.post("/api/uploads", json=duplicated, headers=CSRF).status_code == 400
+    # Windows の一時フォルダでは大文字小文字違いも同じファイルになる。
+    case_only = _upload_body(("A.txt", b"x"), ("a.txt", b"y"))
+    assert client.post("/api/uploads", json=case_only, headers=CSRF).status_code == 400
+    assert fake.ingest_uploads_calls == []
+
+
+def test_upload_rejects_overlong_name(client, fake):
+    long_name = "a" * 252 + ".txt"  # 256文字
+    response = client.post("/api/uploads", json=_upload_body((long_name, b"x")), headers=CSRF)
+    assert response.status_code == 422
     assert fake.ingest_uploads_calls == []
 
 
@@ -523,6 +537,14 @@ def test_delete_upload_only_accepts_upload_keys(client, fake):
     assert response.status_code == 200
     assert client.get("/api/uploads").json()["items"] == []
     assert "uploads/a.pdf" not in store.indexed_sources(collection)
+
+
+def test_delete_unknown_upload_returns_404(client, jobs):
+    response = client.delete("/api/uploads/uploads/missing.pdf", headers=CSRF)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "その資料は見つかりません"
+    # 404 で抜けても共有ロックは解放されている。
+    assert jobs.shared_busy() is False
 
 
 def test_unknown_job_returns_404(client):
