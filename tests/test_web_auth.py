@@ -35,7 +35,7 @@ def test_validate_accepts_generated_hash():
     validate_password_hash(hash_password(PASSWORD, n=2**10))
 
 
-@pytest.mark.parametrize("bad", ["plain", "scrypt:1:2", "scrypt:0:0:0::", "scrypt:0:8:1:AAAA:AAAA", "scrypt:1024:8:1::AAAA"])
+@pytest.mark.parametrize("bad", ["plain", "scrypt:1:2", "scrypt:0:0:0::", "scrypt:0:8:1:AAAA:AAAA", "scrypt:1024:8:1::AAAA", "scrypt:3:8:1:AAAA:AAAA", "scrypt:1:8:1:AAAA:AAAA", "scrypt:1024:0:1:AAAA:AAAA", "scrypt:1024:8:0:AAAA:AAAA"])
 def test_validate_rejects_malformed_hash(bad):
     with pytest.raises(ValueError, match="RAG_WEB_ADMIN_PASSWORD_HASH"):
         validate_password_hash(bad)

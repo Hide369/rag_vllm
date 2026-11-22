@@ -41,12 +41,14 @@ def validate_password_hash(stored: str) -> None:
     if len(parts) != 6 or parts[0] != _PREFIX or not parts[4] or not parts[5]:
         raise ValueError(message)
     try:
-        # scrypt は N/r/p が正の整数でないと動かない（`scrypt:0:0:0::` のような値を弾く）
-        if min(int(parts[1]), int(parts[2]), int(parts[3])) <= 0:
-            raise ValueError("scrypt parameters must be positive")
+        n, r, p = int(parts[1]), int(parts[2]), int(parts[3])
         base64.urlsafe_b64decode(parts[4]), base64.urlsafe_b64decode(parts[5])
     except ValueError as e:
         raise ValueError(message) from e
+    # hashlib.scrypt は N が 2 のべき乗（かつ 2 以上）、r/p が正でないと動かない。
+    # 通しても verify_password が常に False になり、誰もログインできなくなる。
+    if n < 2 or n & (n - 1) != 0 or r <= 0 or p <= 0:
+        raise ValueError(message)
 
 
 def verify_password(password: str, stored: str) -> bool:
