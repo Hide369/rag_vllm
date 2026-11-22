@@ -255,6 +255,24 @@ def test_index_declares_content_security_policy(client):
     assert directives["object-src"] == ["'none'"]
 
 
+@pytest.mark.parametrize("path", ["/", "/api/me", "/api/status", "/api/jobs/missing"])
+def test_security_headers_on_every_response(client, path):
+    headers = client.get(path).headers
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["x-frame-options"] == "DENY"
+    assert headers["content-security-policy"] == "frame-ancestors 'none'"
+
+
+def test_security_headers_on_streamed_chat(client):
+    response = client.post("/api/chat", json=_chat_body(), headers=CSRF)
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
+
+
+def test_index_disables_dns_prefetch(client):
+    assert '<meta http-equiv="x-dns-prefetch-control" content="off">' in client.get("/").text
+
+
 def test_upload_accept_list_matches_supported_suffixes(client):
     # 対応拡張子を API で返していないため、画面側に写しを持つ。食い違うと、選べない
     # 資料が出るか、選べても 400 で弾かれる。
@@ -369,9 +387,17 @@ def test_chat_rejects_system_role_and_oversized_history(client, fake):
         "/api/chat", json=_chat_body(question=""), headers=CSRF
     ).status_code == 422
     assert client.post(
-        "/api/chat", json=_chat_body(question="あ" * 4001), headers=CSRF
+        "/api/chat", json=_chat_body(question="あ" * 100_001), headers=CSRF
     ).status_code == 422
     assert fake.chat_calls == []
+
+
+def test_chat_accepts_long_question(client, fake):
+    # Streamlit 版には質問の長さの上限が無かった。資料を貼って尋ねる長さは通す。
+    response = client.post("/api/chat", json=_chat_body(question="あ" * 4001), headers=CSRF)
+    assert response.status_code == 200
+    assert json.loads(response.text.splitlines()[-1])["type"] == "done"
+    assert len(fake.chat_calls) == 1
 
 
 def test_chat_rejects_unknown_model_and_out_of_range_temperature(client, fake):
@@ -443,6 +469,30 @@ def test_login_sets_strict_httponly_cookie(client):
     assert "samesite=strict" in cookie
     assert f"max-age={12 * 3600}" in cookie
     assert "; secure" not in cookie
+
+
+def test_logout_clears_cookie_with_same_attributes(client):
+    _login(client)
+    response = client.post("/api/logout", headers=CSRF)
+    cookie = response.headers["set-cookie"].lower()
+    assert "rag_web_session=" in cookie
+    assert "max-age=0" in cookie
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
+    assert "path=/" in cookie
+    assert "; secure" not in cookie
+
+
+def test_logout_cookie_is_secure_when_configured(fake, jobs):
+    settings = WebSettings(admin_password_hash=PASSWORD_HASH, cookie_secure=True)
+    app = create_app(settings, services=fake.services(), jobs=jobs)
+    # Secure の Cookie は http の TestClient には送り返されないため、ログインを経ずに確かめる。
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.post("/api/logout", headers=CSRF)
+    cookie = response.headers["set-cookie"].lower()
+    assert "; secure" in cookie
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
 
 
 def test_login_throttled_after_repeated_failures(fake, jobs):

@@ -58,6 +58,14 @@ UPLOAD_CAPTION = (
 )
 SHARED_BUSY_MESSAGE = "ほかの人が取り込み中です。終わってからもう一度実行してください"
 
+# すべての応答に付けるヘッダー。index.html の meta の CSP は frame-ancestors を
+# 扱えない（meta では無視される）ため、埋め込み禁止はヘッダーで送る。
+SECURITY_HEADERS = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"content-security-policy", b"frame-ancestors 'none'"),
+)
+
 # 取り込み・アップロードの対象は社内資料だけ。技術ドキュメントは CLI で取り込む。
 INTERNAL = "internal"
 
@@ -78,7 +86,9 @@ class ChatBody(BaseModel):
     corpus: Corpus
     model: str
     temperature: float = Field(ge=0, le=1)
-    question: str = Field(min_length=1, max_length=4000)
+    # 上限は履歴1件と同じ。Streamlit 版には上限が無く、長い資料を貼って尋ねる使い方を
+    # 狭めないため、異常に大きい入力だけを弾く値にしている。
+    question: str = Field(min_length=1, max_length=100_000)
     history: list[Message] = Field(max_length=100)
 
     @field_validator("model")
@@ -89,13 +99,13 @@ class ChatBody(BaseModel):
         return value
 
 
-class UploadFile(BaseModel):
+class UploadItem(BaseModel):
     name: str = Field(max_length=255)
     content_b64: str
 
 
 class UploadBody(BaseModel):
-    files: list[UploadFile] = Field(min_length=1, max_length=50)
+    files: list[UploadItem] = Field(min_length=1, max_length=50)
 
 
 def _check_upload_name(name: str) -> None:
@@ -116,7 +126,7 @@ def _check_upload_name(name: str) -> None:
         raise HTTPException(400, f"取り込めない種類のファイルです: {name}")
 
 
-def _decode_uploads(files: list[UploadFile], max_bytes: int) -> list[tuple[str, bytes]]:
+def _decode_uploads(files: list[UploadItem], max_bytes: int) -> list[tuple[str, bytes]]:
     seen: set[str] = set()
     decoded: list[tuple[str, bytes]] = []
     total = 0
@@ -142,6 +152,36 @@ def _decode_uploads(files: list[UploadFile], max_bytes: int) -> list[tuple[str, 
     return decoded
 
 
+class SecurityHeadersMiddleware:
+    """全応答に SECURITY_HEADERS を足す ASGI ミドルウェア。
+
+    BaseHTTPMiddleware（@app.middleware）ではなく素の ASGI で書くのは、チャットの
+    NDJSON ストリーミングを途中で溜め込まずにそのまま流すため。
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                names = {name.lower() for name, _ in message.get("headers", [])}
+                extra = [(n, v) for n, v in SECURITY_HEADERS if n not in names]
+                message = {**message, "headers": [*message.get("headers", []), *extra]}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+def _session_cookie_attributes(settings: WebSettings) -> dict:
+    """ログインとログアウトで同じ属性を使う。属性が違うと消せないブラウザがある。"""
+    return {"httponly": True, "secure": settings.cookie_secure, "samesite": "strict", "path": "/"}
+
+
 def create_app(
     settings: WebSettings,
     services: Services | None = None,
@@ -157,6 +197,8 @@ def create_app(
     corpora = CorpusCache(services)
 
     app = FastAPI(title="社内資料RAG", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(SecurityHeadersMiddleware)
+    cookie_attributes = _session_cookie_attributes(settings)
 
     @app.exception_handler(SharedOperationBusy)
     def shared_busy(_request: Request, _error: SharedOperationBusy) -> JSONResponse:
@@ -224,14 +266,14 @@ def create_app(
         sessions.revoke(request.cookies.get(COOKIE_NAME))
         response.set_cookie(
             COOKIE_NAME, sessions.create(), max_age=settings.session_ttl_s,
-            httponly=True, secure=settings.cookie_secure, samesite="strict", path="/",
+            **cookie_attributes,
         )
         return {"admin": True}
 
     @app.post("/api/logout", dependencies=[Depends(require_csrf_header)])
     def logout(request: Request, response: Response) -> dict:
         sessions.revoke(request.cookies.get(COOKIE_NAME))
-        response.delete_cookie(COOKIE_NAME, path="/")
+        response.delete_cookie(COOKIE_NAME, **cookie_attributes)
         return {"admin": False}
 
     # --- 状態・チャット -----------------------------------------------------------------
