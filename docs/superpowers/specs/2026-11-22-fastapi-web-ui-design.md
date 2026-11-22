@@ -21,8 +21,11 @@ Streamlit は操作のたびにスクリプト全体を再実行するため、`
 - ゴール: 今の画面の機能を、足しも削りもせずに新しい画面へ移す（下の「機能一覧」）。
 - ゴール: 複数人が同時に使っても、共有資源（DB・雛形フォルダ）が壊れない。
 - ゴール: 移し終えたら Streamlit 版とその依存を取り除く。
-- 非ゴール: ログイン・利用者ごとの権限。全員が全操作をできる（今の Streamlit と同じ）。
-  アクセス制限は今の配置手順どおり手前の IIS（Windows 認証 + 利用グループ）で行う。
+- ゴール: 差分取り込み（サーバー上の `source/` をまとめて取り込む操作）だけは、管理者として
+  ログインした人しか実行できない（下の「管理者ログイン」）。
+- 非ゴール: 利用者ごとの権限・アカウント。差分取り込み以外（質問、資料のアップロードと
+  削除、雛形の登録・削除）は今の Streamlit と同じく誰でもできる（利用者の選択）。
+  画面に入れる人の制限は今の配置手順どおり手前の IIS（Windows 認証 + 利用グループ）で行う。
 - 非ゴール: 会話履歴の保存。履歴はブラウザのタブの中だけにあり、再読み込みで消える
   （今の Streamlit と同じ）。
 - 非ゴール: 新機能、他アプリ向けの公開 API（API は画面のためのもので、互換性は約束しない）。
@@ -70,7 +73,9 @@ Batch_Exec の `godoc_agent/web/` に倣い、リポジトリ直下に `rag_web/
   `ingest` を import する前。理由は今の `rag_chat_app.py` 冒頭と同じ）、uvicorn で起動する。
 - `rag_web/settings.py` — 環境変数 `RAG_WEB_HOST`（既定 `127.0.0.1`）、`RAG_WEB_PORT`
   （既定 `8502`。移行中に Streamlit の 8501 と並べるため）、`RAG_WEB_MAX_UPLOAD_MB`
-  （1リクエストで受け取る上限、既定 50）。
+  （1リクエストで受け取る上限、既定 50）、管理者ログイン用の `RAG_WEB_ADMIN_PASSWORD_HASH`
+  （必須）・`RAG_WEB_SESSION_TTL_HOURS`・`RAG_WEB_COOKIE_SECURE`。`.env.example` に追記する。
+- `rag_web/auth.py` / `rag_web/password.py` — 管理者ログイン（Batch_Exec から移植）。
 - `rag_web/app.py` — `create_app(...)`。ルーティングと入力の検証だけを持つ。依存
   （チャット関数・埋め込み・ストアの開き方・雛形フォルダ）は引数で差し替えられるように
   して、テストで偽物を渡す（Batch_Exec の `create_app(settings, jobs=..., ...)` と同じ形）。
@@ -104,7 +109,7 @@ Batch_Exec の `godoc_agent/web/` に倣い、リポジトリ直下に `rag_web/
 | サイドバー: モデル名（`MODELS`）、Temperature（0.0〜1.0, 0.1刻み, 既定0.3） | 左の設定欄。値はタブ内の JS が持ち、毎回送る | ① |
 | 検索対象ラジオ（社内資料 / 技術ドキュメント）。切り替えで履歴を消し、その旨を表示 | 同じ。履歴の消去と表示は JS 側 | ① |
 | インデックス済みチャンク数、技術ドキュメントが空のときの警告と CLI コマンド | `GET /api/status` | ① |
-| 差分を取り込む（社内資料のみ）、結果の報告と VLM が使えない旨 | `POST /api/ingest` | ① |
+| 差分を取り込む（社内資料のみ）、結果の報告と VLM が使えない旨 | `POST /api/ingest`（管理者ログインが必要。新規） | ① |
 | 資料をアップロード（ダイアログ）、アップロード済み一覧と削除 | `GET/POST /api/uploads`、`DELETE /api/uploads/{key}` | ① |
 | リランカーの確認と、使えないときの警告 | 初回の検索で確認し、結果を `/api/status` で見せる（下の注） | ① |
 | 会話履歴をリセット | JS 側だけ | ① |
@@ -180,7 +185,25 @@ WebSocket なのでこの問題が見えていなかった。Batch_Exec の `job
 - チャットはジョブにしない。最初の断片が届けばストリームが流れ続けるため。③の配置手順では
   それでも ARR のタイムアウトを延ばしておく（最初の断片までの待ちに備える）。
 
-### `POST /api/ingest`
+### 管理者ログイン
+
+Batch_Exec の `godoc_agent/web/auth.py` と `password.py` を移植する。
+
+- 管理者は1種類だけ（パスワードを知っている人）。`.env` の `RAG_WEB_ADMIN_PASSWORD_HASH` に
+  scrypt のハッシュ（`scrypt:N:r:p:salt:hash` 形式）だけを書く。平文のパスワードはどこにも
+  置かない。ハッシュは `python -m rag_web.password` で作る。
+- 起動時にハッシュの形式を確かめ、未設定・壊れていれば起動しない（誰もログインできない
+  状態で動き続けるのを防ぐ。Batch_Exec の `validate_password_hash` と同じ）。
+- セッションはサーバーのメモリに持ち、Cookie（`HttpOnly`、`SameSite=Strict`、HTTPS 配下では
+  `Secure`。`RAG_WEB_COOKIE_SECURE`）で判別する。有効期限は `RAG_WEB_SESSION_TTL_HOURS`
+  （既定12）。再起動するとログアウトされる。
+- 失敗が続いたら一定時間ログインを受け付けない（Batch_Exec の `LoginThrottle`）。
+- API: `POST /api/login`（`{password}`）、`POST /api/logout`、`GET /api/me`（`{admin: bool}`）。
+- 画面: 設定欄に「管理者ログイン」を置く。ログインしていないときは「差分を取り込む」
+  ボタンを出さない。ログイン中は「ログアウト」を出す。
+- ログインが要るのは `POST /api/ingest` だけ。未ログインなら 401。
+
+### `POST /api/ingest`（管理者のみ）
 社内資料の差分取り込みのジョブを起動する。結果は `{report, notice}`（`format_report` の
 文面と、VLM が使えない理由）。Ollama に繋がらなければ、ジョブを起動せず 503 と理由を返す。
 
