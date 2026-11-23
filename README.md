@@ -257,9 +257,8 @@ BM25に床（フロア）を設けない判断（`ingest/retrieval.py`）が以�
 `python.exe` は自身の位置から環境を解決するため移動の影響を受けない。
 `python.exe -m pytest` や `python.exe -m rag_web` の形ならランチャーを経由しないので常に動く。
 
-（`myvenv313` は過去の名前で、この仮想環境は実際に `09_RAG_FineTuning\04_...` で作成された後に
-移動されており、`pyvenv.cfg` の `command` 行に当時のパスが残っている。
-`python.exe` と `pythonw.exe` 以外の `Scripts\*.exe` は現在すべて壊れている。
+（旧 `myvenv313` は作成後にフォルダーを移動したため、`Scripts\*.exe` が壊れた経緯がある
+`myvenv313` は過去の名前である。`rag_env` も、作成後にフォルダーを移動すると同じ状態になる。
 `.exe` を使えるようにしたい場合は該当パッケージを
 `python.exe -m pip install --force-reinstall --no-deps <package>` で入れ直す。）
 
