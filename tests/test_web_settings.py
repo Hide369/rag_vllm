@@ -51,3 +51,22 @@ def test_forwarded_allow_ips_is_stripped():
 def test_concurrency_values_name_the_variable(name, value):
     with pytest.raises(ValueError, match=name):
         load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h", name: value})
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("127.0.0.1", "127.0.0.1"),
+    ("::1", "::1"),
+    (" 127.0.0.1 , 10.0.0.0/24,fd00::/8 ", "127.0.0.1,10.0.0.0/24,fd00::/8"),
+    ("", ""),
+])
+def test_forwarded_allow_ips_accepts_ips_and_cidrs(value, expected):
+    s = load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h", "RAG_WEB_FORWARDED_ALLOW_IPS": value})
+    assert s.forwarded_allow_ips == expected
+
+
+@pytest.mark.parametrize("value", [
+    "*", "127.0.0.1,*", "127.0.0.l", "localhost", "10.0.0.1,", "10.0.0.1/24"])
+def test_forwarded_allow_ips_rejects_wildcards_and_typos(value):
+    with pytest.raises(ValueError, match="RAG_WEB_FORWARDED_ALLOW_IPS") as error:
+        load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h", "RAG_WEB_FORWARDED_ALLOW_IPS": value})
+    assert repr(value) in str(error.value)
