@@ -215,12 +215,17 @@ def test_vlm_embed_profile_starts_vlm_first_then_bge_m3_within_one_gpu(tmp_path,
     vlm = commands["qwen3-vl-8b"]
     assert _option(vlm, "--port") == "8003"
     assert _option(commands["bge-m3"], "--port") == "8002"
-    fractions = [float(_option(command, "--gpu-memory-utilization")) for command in commands.values()]
-    assert sum(fractions) <= 0.90
+    # 0.80 / 8192 は L4 と見られる GPU で KV キャッシュが 0.26GiB しか残らず起動に失敗した。
+    # 下の値は A100 で起動を確かめた（2026-11-23）。L4 では未確認。合計 0.93 の残り
+    # 約1.6GiB（L4 の場合）で、2プロセス分の固定費をまかなう
+    assert _option(vlm, "--gpu-memory-utilization") == "0.83"
+    assert _option(commands["bge-m3"], "--gpu-memory-utilization") == "0.10"
     # 埋め込みと同居するぶん文脈を縮めるので、大きな画像の視覚トークンに上限を付ける
-    assert int(_option(vlm, "--max-model-len")) == 8192
+    max_model_len = int(_option(vlm, "--max-model-len"))
+    assert max_model_len == 4096
     max_pixels = json.loads(_option(vlm, "--mm-processor-kwargs"))["max_pixels"]
-    assert max_pixels // (32 * 32) < 8192
+    # 視覚トークン（32×32画素で1つ）のほかに、指示文と出力が文脈に収まる余地を残す
+    assert max_pixels // (32 * 32) <= max_model_len - 1024
     assert json.loads(_option(vlm, "--limit-mm-per-prompt")) == {"video": 0}
 
     assert set(namespace["vllm_procs"]) == {"vlm", "embed"}
