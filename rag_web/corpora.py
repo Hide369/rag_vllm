@@ -7,9 +7,7 @@ import threading
 from collections.abc import Callable
 
 from ingest import conditions, store
-from ingest.embedder import EMBED_DIM
 from ingest.reranker import RerankError
-from ingest.vllm_config import load_vllm_settings
 
 from .services import Services
 
@@ -43,15 +41,9 @@ class CorpusCache:
         db_path = self._db_path(corpus)
         with self._lock:
             if corpus not in self._collections:
-                collection = self._services.open_store(db_path)
-                try:
-                    store.ensure_embedding_model(
-                        collection, load_vllm_settings().embed_model, EMBED_DIM
-                    )
-                except Exception:
-                    collection.close()
-                    raise
-                self._collections[corpus] = collection
+                self._collections[corpus] = store.ensure_collection_matches_settings(
+                    self._services.open_store(db_path)
+                )
             return self._collections[corpus]
 
     def _cached(self, cache: dict, corpus: str, build: Callable):

@@ -88,19 +88,27 @@ def record_embedding_model(collection, model: str, dim: int) -> None:
     collection.set_meta_if_absent(_DIM_KEY, str(dim))
 
 
-def open_store(path: str):
-    """DBを開き、設定の埋め込みモデルと合うことまで確かめる。
+def ensure_collection_matches_settings(collection):
+    """開いた DB が設定の埋め込みモデルと合うことを確かめ、同じ collection を返す。
 
-    開くのと確かめるのを分けると、確かめ忘れた入口が食い違いに気づかない。
-    食い違ったときは接続を閉じてから投げる（開きっぱなしで残さない）。
+    食い違ったときは接続を閉じてから投げる（開きっぱなしで残さない）。確認の置き場所は
+    ここ1か所にする。DB を開く側（open_store、rag_web のコーパスのキャッシュ）が
+    それぞれ書くと、片方だけ直して食い違う。
     """
-    collection = vector_store.open_store(path)
     try:
         ensure_embedding_model(collection, load_vllm_settings().embed_model, EMBED_DIM)
     except Exception:
         collection.close()
         raise
     return collection
+
+
+def open_store(path: str):
+    """DBを開き、設定の埋め込みモデルと合うことまで確かめる。
+
+    開くのと確かめるのを分けると、確かめ忘れた入口が食い違いに気づかない。
+    """
+    return ensure_collection_matches_settings(vector_store.open_store(path))
 
 
 def stored_file_hash(collection, source: str) -> str | None:
