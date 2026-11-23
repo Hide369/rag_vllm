@@ -22,7 +22,7 @@ search_documents(query: str, n_results: int = 4) -> str
 
 ## 前提
 
-- Ollama がセットアップ済みで、`bge-m3` が導入済みであること（下記）
+- 埋め込みの vLLM（`bge-m3`）が起動していること（下記）
 - Python 依存関係が導入済みであること（`pip install -r requirements.txt`。`mcp` を含む）
 - 資料が `source/` に配置され、`python -m scripts.ingest_source` で取り込み済みであること
 
@@ -30,155 +30,28 @@ DB のパスはサーバが `store.DB_PATH`（`ingest/store.py:20`。リポジ�
 `vector_store.sqlite3`）から自動的に決める。引数にも環境変数にも取らないため、
 利用者が DB の場所を設定する項目はない。
 
-### `ollama pull bge-m3` は必須
+### 埋め込みの vLLM（`bge-m3`）は必須
 
 質問文のベクトル化に使う埋め込みモデルは `bge-m3` である（`ingest/embedder.py` の
-`EMBED_MODEL`）。これを導入していないと検索が一切成立しない。導入先で一度だけ
-実行する。
+`EMBED_DIM` が1024次元を前提にし、モデル名は `VLLM_EMBED_MODEL`）。これが動いていないと
+検索が一切成立しない。宛先は `VLLM_EMBED_URL`（既定 `http://127.0.0.1:8002`）で、
+認証が要るなら `VLLM_API_KEY`。起動は [server-deployment.md](server-deployment.md)
+（開発機なら Colab の `chat+embed` の組。README「ColabのL4でvLLMを試す」）。
 
-**このサーバが Ollama に求めるのは `bge-m3` だけである。** 回答文を作らないため
-生成モデル（`gpt-oss:20b` 等）は一切呼ばない。回答を書くのは Codex 側であり、
-そのために約13GBを引く必要はない。
-
-```powershell
-ollama pull bge-m3
-```
+**このサーバが vLLM に求めるのは埋め込み（`bge-m3`）だけである。** 回答文を作らないため
+生成モデル（`gpt-oss` 等）は一切呼ばない。回答を書くのは Claude Code や Codex 側である。
 
 取り込み時と検索時で埋め込みモデルが食い違うと、例外は出ないまま検索結果だけが
-無意味になる。取り込み側（`scripts/ingest_source.py`）も同じ `bge-m3` を使うため、
-このコマンドは検索用と取り込み用を兼ねる。
+無意味になる。DB には埋め込みモデルが記録され、設定と食い違う DB は開いた時点で
+止まる（このサーバも止まる）。取り込み側（`scripts/ingest_source.py`）も同じ `bge-m3` を使う。
 
-## `~/.codex/config.toml` への登録
-
-`~/.codex/config.toml` の `mcp_servers` に、社内資料検索・context7（OSSドキュメント
-検索）・playwright（ブラウザ操作）の3サーバを登録する。
-
-```toml
-[mcp_servers.local_docs]
-command = "C:\\...\\local_llm\\rag_env\\Scripts\\python.exe"
-args = ["-m", "scripts.rag_mcp_server"]
-cwd = "C:\\...\\local_llm"
-
-[mcp_servers.context7]
-url = "https://mcp.context7.com/mcp"
-env_http_headers = { "CONTEXT7_API_KEY" = "CONTEXT7_API_KEY" }
-
-[mcp_servers.playwright]
-command = "npx"
-args = ["-y", "@playwright/mcp@latest"]
-```
-
-`command` と `cwd` の `C:\\...\\local_llm` は、実際の `local_llm` の絶対パスに
-置き換える。
-
-### `cwd` の指定は必須
-
-`python scripts\rag_mcp_server.py` のように直接起動すると、`sys.path` に
-リポジトリルートが入らず `from ingest import ...` が `ModuleNotFoundError` に
-なる。`args = ["-m", "scripts.rag_mcp_server"]`（`-m` 起動）と `cwd`
-（リポジトリルート）の組み合わせで、`python -m scripts.rag_mcp_server` を
-リポジトリルートで実行したのと同じ状態を作る。どちらか一方が欠けても直らない。
-
-### context7 の API キーは値を書かない
-
-`env_http_headers` はヘッダ名 → 参照する環境変数名の対応であり、キーの値そのもの
-ではない。上の例では、ヘッダ `CONTEXT7_API_KEY` の値を環境変数 `CONTEXT7_API_KEY`
-から取ることを意味する。`config.toml` は秘密情報の置き場所ではない
-（リポジトリ内の `.env` と違い `.gitignore` の対象外にあるため、ここに直接
-値を書くと平文でホームディレクトリに残る）。
-
-キーは `ctx7sk-` で始まり、Context7 のダッシュボードから無償で取得できる。
-未設定でも動作するが、レート制限が厳しくなる。先方環境ではまず未設定で運用し、
-制限に当たってから取得すればよい。取得したキーは Windows の環境変数
-（例: `setx CONTEXT7_API_KEY "ctx7sk-..."`）として設定し、`config.toml` には
-書かない。
-
-### context7 が `npx` ではなく `url` を使う理由
-
-Windows で `npx.cmd` を `command` に指定すると、絶対パス指定や `SystemRoot` /
-`APPDATA` の明示が必要になる既知の躓きがある（公式 README にトラブル
-シュート専用の設定例が置かれている）。context7 は `url` 方式（streamable HTTP）
-に対応しているため、これを避けられる。一方 playwright はブラウザを実際に
-起動する都合上ローカル実行が必須で、`url` 方式は選べない。Node.js / `npx` は
-playwright を使う導入先に別途必要になる。
-
-## `~/.codex/AGENTS.md` への追記
-
-`config.toml` が書けるのは接続先までで、**どの質問で検索するか**は書けない。ツール
-の説明文（[rag_mcp_server.py:205](../scripts/rag_mcp_server.py#L205)）にも呼ぶべき
-条件は含まれないため、Codex が自分の知識で答えてしまえば検索は一度も走らない。
-
-`~/.codex/AGENTS.md` に、本リポジトリの [AGENTS.md](../AGENTS.md) から「社内資料の
-参照」「外部ドキュメントの参照」の2節をそのまま貼る。ホーム直下の AGENTS.md は
-リポジトリを問わず読まれるので、利用者が別のリポジトリで作業していても効く。
-
-**冒頭の開発ガイドライン部分は貼らないこと。** superpowers スキル・PowerShell・
-仮想環境の取り決めであり、本リポジトリを開発しない利用者には無関係である。
-
-0件時の歯止めはサーバ側にもあるため二重になっている。何がサーバ側だけで足り、何が
-AGENTS.md にしか無いのかは
-[mcp-server-network.md](mcp-server-network.md) の「AGENTS.md が無いと何が壊れるか」
-にある。
-
-## 動作確認
-
-設定を保存したら、Codex を起動し直す。`/mcp` などで `local_docs` が接続済みで
-あることを確認したうえで、社内資料に関する質問を投げる。
-
-```text
-社内資料で〇〇について調べて、出典を挙げて教えてください。
-```
-
-`search_documents` が呼ばれ、`## [1] cosine距離 ... ／ BM25 ... ／ Reranker ...`
-の形式で、出典（ファイル名とページ・スライド番号）つきの原文が返れば成功である。
-
-### 初回検索が遅い
-
-リランカー（`bge-reranker-v2-m3`）はサーバ起動時ではなく初回の検索時に遅延
-ロードされる。検索しないセッションにロード時間を払わせないためである。
-
-実測（2026-09-08、i5-1240P / Windows 11、570出現・本文512種）:
-
-| 経路 | 初回 | 2回目以降 |
-|---|---|---|
-| stdio 経由（`tools/call`） | 6.83秒 | 3.53 / 3.47秒 |
-| プロセス内（同一クエリ5回） | 6.99秒 | 3.55 / 3.41 / 3.48 / 3.53秒 |
-
-初回だけ遅いのはモデルのロードが原因であり異常ではない。2回目以降が数秒かかるのは
-CPUでリランカーを回しているためで、こちらも異常ではない。CPUが違えば数字も変わる
-ので、導入先で気になったら測り直すこと。
-
-### 導入直後・DBが空のときの応答
-
-資料を1件も取り込んでいない状態で検索すると、「見つかりませんでした」ではなく
-次の文言が返る。
-
-```
-ベクトルDBが空です。取り込みが未実行の可能性があります。
-python -m scripts.ingest_source を実行してください。
-```
-
-導入直後にこの文言が出た場合は、資料の取り込み（前提の3番目）が未実施である
-ことを疑う。「関連する記述が無い」旨の応答（4節にある0件時の文言）とは別の
-文言なので混同しないこと。
-
-### 資料に無いことを聞いたときの応答
-
-検索が0件でも、Codex は止まらない。**一般知識で答えられる質問なら、社内資料に
-基づかない一般的な回答である旨を断ったうえで通常どおり答える。** ライブラリの
-使い方のように資料と無縁の質問がこの経路に入るためである。
-
-一方で社内固有の事項（規程・議事録・社内の決定）は、0件でも推測させない。この
-線引きはサーバが返す `_FALLBACK`
-（[rag_mcp_server.py:37-43](../scripts/rag_mcp_server.py#L37-L43)）と
-[AGENTS.md](../AGENTS.md) の両方が受け持つ。経緯は
 [mcp-server-network.md](mcp-server-network.md) の同名の節にある。
 
 ### エラー時の応答
 
-Ollama が起動していない、あるいは `bge-m3` が未導入の場合は、`embedder` が
-持つ案内文言（「`ollama pull bge-m3` を実行してください」等）がそのまま返る。
-想定内のエラー（Ollama 疎通・埋め込みの失敗）は検索結果と同じ形式のテキストとして
+埋め込みの vLLM が起動していない、あるいは `VLLM_EMBED_MODEL` のモデルが載っていない場合は、`embedder` が
+持つ案内文言（「vLLM（埋め込み）に接続できません」「埋め込みモデル … がサーバーにありません」等）がそのまま返る。
+想定内のエラー（vLLM 疎通・埋め込みの失敗）は検索結果と同じ形式のテキストとして
 届く。リランカーの取得に失敗した場合は、エラーにせず RRF 順のまま検索を続ける。
 
 それ以外の想定外の例外はサーバプロセスを落とさず、MCP の `is_error=True` な結果に
@@ -190,7 +63,7 @@ Ollama が起動していない、あるいは `bge-m3` が未導入の場合は
 ## 導入先での作業手順（まとめ）
 
 1. `pip install -r requirements.txt`（`mcp` を含む）
-2. `ollama pull bge-m3`（生成モデルは不要）
+2. 埋め込みの vLLM（`bge-m3`）を起動する（生成モデルは不要）
 3. 資料を `source/` に配置し、`python -m scripts.ingest_source` で取り込む
 4. `~/.codex/config.toml` に上記3サーバを登録する
 5. `~/.codex/AGENTS.md` に `AGENTS.md` の「社内資料の参照」「外部ドキュメントの参照」を貼る

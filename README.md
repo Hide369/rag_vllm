@@ -2,45 +2,56 @@
 
 PDF・PowerPoint・Word・Markdown を完全ローカルでベクトルDBに取り込み、出典付きで回答するRAGチャット。
 既定では外部サービスへの送信は一切行わない
-（GPUを強化したい場合のみ、任意で「[ColabのL4 GPUに接続する](#colabのl4-gpuに接続する)」を使える）。
+（GPUを強化したい場合のみ、任意で「[ColabのL4でvLLMを試す](#colabのl4でvllmを試す)」を使える）。
 「運転音26dB以下で奥行き510mmに設置できる機種」のように数値条件を含む質問は、ベクトル検索ではなく
 Markdownのフロントマター由来のメタデータで機械的に絞り込み、条件に合う資料を全件そろえた表から回答する。
 
 ## 必要なもの
 
 - Python 3.13（`rag_env`）
-- Ollama（インストール直後の標準ポート `http://127.0.0.1:11434` で待ち受けていること）
-- モデル: `ollama pull bge-m3`（埋め込み）と `ollama pull gpt-oss:20b`（回答生成）
-  。生成モデルを別のものにするときは、pullしたうえで `rag_web/app.py` の
-  `CHAT_MODEL` を書き換える（下記「モデルの比較」参照）
+- 推論サーバー: vLLM（OpenAI互換API）。役割ごとに別のプロセスで、既定の宛先は
+  `http://127.0.0.1:8001`（生成）・`8002`（埋め込み）・`8003`（画像説明）。
+  - 本番はGB10の上に3つ立てる（[docs/server-deployment.md](docs/server-deployment.md)）。
+  - 開発機にはGPUが足りないため、GB10が使えるまではColabのL4に立てて繋ぐ
+    （「[ColabのL4でvLLMを試す](#colabのl4でvllmを試す)」）。開発機にOllamaは要らない。
+- モデル（`--served-model-name` と、下の環境変数のモデル名を一致させる）:
+  生成 `gpt-oss-120b`（Colabでは `gpt-oss-20b`）、埋め込み `bge-m3`、
+  画像説明 `qwen3-vl-30b-a3b`（Colabでは `qwen3-vl-8b`）
 
-### Ollamaの待ち受けポートについて
+### vLLMの接続先を環境変数で指定する
 
-`ingest/embedder.py` の `DEFAULT_OLLAMA_HOST` はOllamaの標準ポート
-`http://127.0.0.1:11434` に合わせてあるため、通常は何も設定せずに動く。
-`ollama list` が応答すれば、そのOllamaに接続できる。
+接続先とモデル名は環境変数で決まり、`.env.example` を `.env` にコピーして書く。
 
-標準以外のポートで動かしている場合のみ、環境変数 `OLLAMA_HOST` で上書きする。
-`http://` から書くこと（コードはこの値をそのままURLに埋め込む）。
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `VLLM_CHAT_URL` | `http://127.0.0.1:8001` | 生成のvLLM |
+| `VLLM_EMBED_URL` | `http://127.0.0.1:8002` | 埋め込みのvLLM |
+| `VLLM_VLM_URL` | `http://127.0.0.1:8003` | 画像説明のvLLM |
+| `VLLM_CHAT_MODEL` | `gpt-oss-120b` | 生成のモデル名 |
+| `VLLM_EMBED_MODEL` | `bge-m3` | 埋め込みのモデル名 |
+| `VLLM_VLM_MODEL` | `qwen3-vl-30b-a3b` | 画像説明のモデル名 |
+| `VLLM_API_KEY` | （空） | 設定すれば `Authorization: Bearer` で3つに送る |
 
-```powershell
-$env:OLLAMA_HOST="http://127.0.0.1:12000"
-.\rag_env\Scripts\python.exe -m scripts.ingest_source
-```
-
-`localhost` は使わないこと。Windowsでは先にIPv6の `::1` に解決され、
-1リクエストあたり約2.1秒を浪費する（`127.0.0.1` なら約80ms）。
+- URLは**末尾に `/v1` を付けない**（プログラムが `/v1/...` を足す。付けると起動時に止まる）。
+- 古い `OLLAMA_HOST` / `OLLAMA_API_KEY` / `OLLAMA_VLM_MODEL` が残っていると、入口が
+  「VLLM_* へ移行してください」と止める。
+- `localhost` は使わないこと。Windowsでは先にIPv6の `::1` に解決され、
+  1リクエストあたり約2.1秒を浪費する（`127.0.0.1` なら約80ms）。
+- 埋め込みモデルはDBに記録され、設定と食い違うDBは開いた時点で止まる。Ollama版で作ったDB
+  （記録なし）はbge-m3・1024次元とみなす。本番のDBを切り替える前に
+  `python -m scripts.check_embedding_compat --db vector_store.sqlite3` でvLLMのbge-m3との
+  一致（最小のコサイン類似度0.99以上）を確かめる。
 
 ## セットアップ
 
-別PCのブラウザーから利用するサーバー配置は、現在は行わない。GB10 への配置手順は
-vLLM への切り替えのときに書き直す（[docs/server-deployment.md](docs/server-deployment.md)）。
+別PCのブラウザーから利用するサーバー配置は、GB10 への配置手順（[docs/server-deployment.md](docs/server-deployment.md)）を参照する。
+開発機では `.\run_web.ps1` で動かす。
 
 ```powershell
 .\rag_env\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-各パッケージの用途、Ollamaで必要なモデル、自動ダウンロードされるOCR/リランカーの
+各パッケージの用途、vLLMで必要なモデル、自動ダウンロードされるOCR/リランカーの
 モデルまで含めた一覧は [docs/依存関係一覧.md](docs/依存関係一覧.md) にまとめてある。
 
 ## 使い方
@@ -75,7 +86,7 @@ XMLから図形のラベル文字を直接読む（ラベルはすでに構造�
 .\rag_env\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx
 
 # PDF/PPTX内の図・写真もVLMで説明文化する（大幅に時間が伸びる。事前に
-# ollama pull qwen3-vl:8b が必要。ColabのL4に接続していればそちらで処理される）
+# 画像説明のvLLM（VLLM_VLM_URL）が必要。Colabの `vlm` の組に繋いでいればそちらで処理される）
 # チャット画面からの取り込みはこれを常に行う（下の「図表の説明文化」参照）。
 # CLIで選べるようにしてあるのは、初回の全量取り込みで外せるようにするためである
 .\rag_env\Scripts\python.exe -m scripts.ingest_source --with-vlm
@@ -112,7 +123,7 @@ Web画面のサイドバーの「差分を取り込む」も同じ処理を呼�
 スクリーンショット、Markdownが `![alt](path)` で参照する画像、`.png`/`.jpg`/`.jpeg`
 単体のすべてが同じ経路（`ingest/image_text.py` の `describe_image()`）を通る。
 VLMの説明文（`[図の説明] `）とOCRで読んだ文字（`[画像内の文字] `）は独立に実行し、
-片方が失敗してももう片方の結果は残す（Ollamaが止まっているだけでOCRの読めた文字
+片方が失敗してももう片方の結果は残す（vLLMが止まっているだけでOCRの読めた文字
 まで捨てることになるのを避けるため）。埋め込み画像にもOCRを通すのはこの版からで、
 以前はVLMの説明文しか付かなかった。
 
@@ -142,7 +153,7 @@ OCRのモデルを後から入れた場合は、アプリまたは取り込み�
 黙って欠けるだけだった。パーサーは画像を見つけたときにしか
 `caption_image` を呼ばないため、図の無い資料に渡しても取り込みは遅くならない。
 
-VLMが使えないとき（`ollama pull qwen3-vl:8b` がまだ、Ollamaが停止しているなど）は
+VLMが使えないとき（画像説明のvLLMが未起動、`VLLM_VLM_MODEL` が違うなど）は
 **取り込みを止めない**。図表の説明を付けずに取り込み、その理由を画面に出す。
 本文だけでも入れられるほうが役に立つためである。`caption_image` を渡したまま
 失敗させる選択は取っていない。画像1枚ごとに4回のリトライ（1+2+4秒）が走り、
@@ -166,7 +177,7 @@ CLIの `--with-vlm` はそのまま残してある。初回の全量取り込み
 
 **この入れ直しにどれだけ待つかの実測**（2026-09-12、絞り込みなしで
 `--force --with-vlm` を全44ファイル（.md 30 / .pptx 7 / .docx 5 / .pdf 2）に流した場合）:
-Colab L4上のOllama（`bge-m3` の埋め込み、`qwen3-vl:8b` のVLM、OCRも含めて全部リモート。
+Colab L4上のOllama（**この実測はOllama版のときのもの**。`bge-m3` の埋め込み、`qwen3-vl:8b` のVLM、OCRも含めて全部リモート。
 ngrok経由でローカルから接続）で **2340秒（39分0秒、02:33:45Z〜03:12:45Z、終了コード0）**。
 812チャンク・33件のナビゲーション除外（7ファイル）に加えて、画像からは
 「[図の説明] 」186行・「[画像内の文字] 」164行（9ファイル）が入った。186と164の差の
@@ -178,8 +189,8 @@ ngrok経由でローカルから接続）で **2340秒（39分0秒、02:33:45Z�
 - **このコーパスに `.xlsx`・`.drawio`・単体の `.png`/`.jpg`/`.jpeg` は一つも含まれていない。**
   つまり39分はPDF/PPTX/DOCXの埋め込み画像経路だけの実測で、スクリーンショットを
   貼り込んだExcelや`.drawio`図が混じるコーパスではこれより伸びる。
-- **これはGPU（Colab L4、Ollamaはngrok経由でリモート接続）の数字であり、ローカルCPUの
-  Ollamaで走らせた場合の数字ではない。** ローカルCPUで同じコマンドを流すと、この
+- **これはGPU（Colab L4、Ollama版のときにngrok経由でリモート接続）の数字であり、ローカルCPUの
+  Ollamaで走らせた場合の数字でも、vLLMでの数字でもない（vLLMでの実測はしていない）。** ローカルCPUで同じコマンドを流すと、この
   数字よりはるかに長く待つことになる。
 
 ### 画面から資料を取り込む（アップロード）
@@ -300,7 +311,8 @@ py -3.13 -m venv rag_env
 フォーマットファイルからの文書生成（登録・削除もログインなし）も使える。
 
 新しい画面ではモデルを選ばない。回答生成のモデルは `rag_web/app.py` の `CHAT_MODEL`
-（現在は `gpt-oss:20b`）で固定している。変えるときは `ollama pull` してからここを直す。
+（環境変数 `VLLM_CHAT_MODEL`、既定 `gpt-oss-120b`）から読む。変えるときは、vLLMの
+`--served-model-name` と合わせる。
 
 ## 技術ドキュメントの取り込み
 
@@ -320,7 +332,7 @@ py -3.13 -m venv rag_env
 # 1. 取得（外部通信あり。docs_sources.toml に書かれたURLだけ）
 .\rag_env\Scripts\python.exe -m scripts.fetch_docs
 
-# 2. 取り込み（Ollama への接続が要る）
+# 2. 取り込み（埋め込みのvLLMへの接続が要る）
 .\rag_env\Scripts\python.exe -m scripts.ingest_source --source-dir docs_source `
     --db docs_store.sqlite3 --keep-code-blocks
 ```
@@ -360,7 +372,7 @@ py -3.13 -m venv rag_env
 `docs_store.sqlite3` は追跡しない（340MB、`docs_source/` からいつでも作り直せる）。
 **`docs_source/`（27MB）は 2026-09-13 に追跡対象にした。** 外部通信が要るのは
 `fetch_docs` だけなので、これを持ち込めば移植先は `ingest_source` だけで済み、
-オフラインでも取り込める（触る外部は `OLLAMA_HOST` のみ）。
+オフラインでも取り込める（触る外部は `VLLM_EMBED_URL` と `VLLM_VLM_URL` のみ）。
 
 `kind = "local"` の原本は `docs/pg_data/` に置いて追跡する。公開されている
 Markdown がどこにも無い資料（Go の言語仕様と C# の言語仕様。公式はどちらも HTML
@@ -428,90 +440,72 @@ Task 1〜6を終えた時点では、この機能は**日本語の質問に対�
 を拾えており回答自体は正しかったが、他の3問と比べて安全域が薄いことは
 記録しておく。
 
-## ColabのL4 GPUに接続する
+## ColabのL4でvLLMを試す
 
-ローカルPCのGPUが非力な場合、生成・埋め込みの両方をGoogle Colab（有料版のL4 GPU）上の
-Ollamaに肩代わりさせられる。現在Colab側に置いているのは `gpt-oss:20b`（生成）・
-`bge-m3`（埋め込み）・`qwen3-vl:8b`（VLM）の3つで、合計してもL4の24GB VRAMに収まる。
+GB10 がまだ使えない間、開発機のRAGアプリをGoogle Colab（有料版のL4 GPU、24GB）上の
+vLLMに繋いで確かめられる。L4には3つは載らないため、
+[colab/run_vllm_server.ipynb](colab/run_vllm_server.ipynb) のセル0の `VLLM_PROFILE` で
+起動する組を選ぶ。
 
-仕組みは単純で、[ingest/embedder.py](ingest/embedder.py) と [rag_web/](rag_web/)
-が接続先を環境変数 `OLLAMA_HOST` から読む既存の仕組みをそのまま使う。Colab側にOllamaと、
-`X-API-Key` ヘッダーで認証する軽量なリバースプロキシを立て、ngrokでその1ポートだけを
-外部公開する。
+| `VLLM_PROFILE` | 起動するモデル | 用途 |
+|---|---|---|
+| `"chat+embed"`（既定） | `gpt-oss-20b` と `bge-m3` | 回答の生成と、検索用の埋め込み |
+| `"vlm"` | `qwen3-vl-8b` | 取り込み時の画像説明 |
+
+仕組み: Colab側に vLLM と `Authorization: Bearer` を検証する軽量なリバースプロキシを立て、
+ngrokでその1ポートだけを外部公開する。プロキシはパスの先頭（`/chat`・`/embed`・`/vlm`）で
+転送先を選ぶため、ngrokのURLは1つで済む。
 
 **手順**
 
-1. [colab/run_ollama_server.ipynb](colab/run_ollama_server.ipynb) をGoogle Colabで開く
-   （ランタイム → ランタイムのタイプを変更 → GPU: L4）
+1. ノートブックをGoogle Colabで開く（ランタイム → ランタイムのタイプを変更 → GPU: L4）
 2. [ngrok](https://ngrok.com) の無料アカウントでauthtokenを取得しておく
-3. ノートブックのセルを上から順に実行する。最後に表示される `OLLAMA_HOST`
-   （ngrokの公開URL）と `OLLAMA_API_KEY` を控える
-4. ローカルで `.env.example` を `.env` にコピーし、その2つの値を書き込む
+3. ノートブックのセルを上から順に実行する。最後に表示される `VLLM_*` の行
+   （ngrokのURL・モデル名・`VLLM_API_KEY`）を控える
+4. ローカルで `.env.example` を `.env` にコピーし、その行を書き込む
+   （URLは `/v1` で終わらせない。組を切り替えるたびにURLとキーが変わる）
 5. いつも通り起動する
 
    ```powershell
    .\run_web.ps1
    ```
 
-   生成・埋め込みともにColab側のOllamaで処理される。
-
 **知っておくこと**
 
-- Colabのランタイムはアイドルや時間経過で切断される。常時稼働のAPIとしてではなく、
-  使う時だけノートブックを起動する運用を前提にしている。切断されたら
-  ノートブックを再実行し、新しいURLとAPIキーで `.env` を更新する。
-- `X-API-Key` が一致しないリクエストはプロキシが401で拒否するが、ngrokのURLと
-  APIキー自体は他人に共有しないこと（Colab上の資料・会話内容に到達できてしまう）。
-- ローカルのOllamaに戻すには、`.env` の `OLLAMA_HOST` / `OLLAMA_API_KEY` を削除するか
-  コメントアウトすればよい（既定値の `http://127.0.0.1:11434` に戻る）。
-
-### ColabのL4でvLLMを試す
-
-このリポジトリ（`rag_vllm`）は、RAGをOllamaからvLLMへ移すためにOllama版
-（`Hide369/local-llm-rag`）から複製したものである。その第一歩として
-[colab/run_vllm_server.ipynb](colab/run_vllm_server.ipynb) で、L4上のvLLMに
-`openai/gpt-oss-20b` を立て、同じ認証プロキシ + ngrok の構成で OpenAI 互換API
-（`/v1/chat/completions` など）を手元から叩ける。ノートブック内に応答時間を計るセルと、
-PowerShell からの呼び出し例がある。
-
-- **RAGアプリはまだ動かない**: `rag_web/` と `ingest/` はOllamaのネイティブAPI
-  （`/api/chat`・`/api/embed`・`/api/tags`）を使うため、このURLを `.env` に入れても
-  回答生成・埋め込みは失敗する。RAG側の切り替えは今後の作業である。
-- 埋め込み（bge-m3）とVLM（qwen3-vl）はこのノートブックでは立てていない。
+- Colabのランタイムはアイドルや時間経過で切断される。使う時だけ起動する運用を前提にする。
+  切断されたらノートブックを再実行し、新しいURLとAPIキーで `.env` を更新する。
+- `Authorization: Bearer` が一致しないリクエストはプロキシが401で拒否するが、ngrokのURLと
+  APIキーは他人に共有しないこと。**この経路に、質問と資料の本文が乗る**
+  （[AGENTS.md](AGENTS.md) の外部経路の説明）。資料を外へ出せないなら使わない。
+- 手元のvLLMに戻すには、`.env` の `VLLM_*` を削除するかコメントアウトする
+  （既定の `http://127.0.0.1:8001`〜`8003` に戻る）。
+- 実測（2026-11-23、Colab L4、`chat+embed`）: gpt-oss-20b（`--max-model-len 32768`、
+  メモリの割合0.80）とbge-m3（0.10）で、チャット（両コーパス、ストリーム）とCowork
+  （フォーマットなし生成）が通った。`scripts/check_embedding_compat.py` は
+  `vector_store` が n=300・最小0.999774・平均0.999971、`docs_store` が n=300・最小
+  0.999820・平均0.999976（しきい値0.99、どちらも合格）。`scripts/check_retrieval.py docs`
+  は距離の門が分離できた。`internal` は、BM25だけで引く回帰ケースが1件落ちる
+  （この切り替えの前からある問題で、vLLMとは無関係）。
+  `vlm` の組（画像説明）は実測はしていない（Colabでの確認待ち）。
 - 設計: [docs/superpowers/specs/2026-11-22-vllm-colab-notebook-design.md](docs/superpowers/specs/2026-11-22-vllm-colab-notebook-design.md)
 
-## GB10サーバーにvLLMを立てる
+## GB10サーバーに配置する
 
-**RAG本体への導入は2026-09-16に見送った。検索と生成はOllamaのまま運用する。**
-以下は調査の記録である。実機で動かしてはいない。
+本番の設置先は社内LANのGB10（DGX Spark）1台で、推論はすべてGB10上のvLLM3つ
+（生成 `gpt-oss-120b`、埋め込み `bge-m3`、画像説明 `Qwen3-VL-30B-A3B`（FP8））が受け持つ。
+GB10にOllamaは置かない。配置手順は [docs/server-deployment.md](docs/server-deployment.md)、
+設定ファイル（Docker compose・systemd・Nginx）は [deploy/gb10/](deploy/gb10/) にある。
 
-**コーディングエージェント向けにはvLLMを使う。** そちらの手順は
-[GB10のvLLM + gpt-oss-120b でCodexとClaude Codeを使う](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm/vllm-gb10-coding-agent.md)
-にある。
+**GB10の実機ではまだ動かしていない（実測はしていない）。** 手順と設定は設計書に基づく
+見込みで、実機で通してから注記を外す。
 
-Nvidia GB10（DGX Spark）を社内の推論サーバーにして、生成とコーディングエージェントを
-そこへ寄せる場合の手順は [Batch_Exec の docs/other/vllm/vllm-gb10.md](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm/vllm-gb10.md) にある。
-載せるモデルの選定（生成・VLM・埋め込みの3本）と、その導入手順は
-[Batch_Exec の docs/other/vllm/vllm-gb10-models.md](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm/vllm-gb10-models.md) に分けてある。
-vLLMの起動がメモリ不足で通らないときの切り分けは
-[Batch_Exec の docs/other/vllm/vllm-gb10-memory.md](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm/vllm-gb10-memory.md)、
-1台に載らないモデルをGB10を4台に分けて動かす手順は
-Batch_Exec リポジトリの [docs/other/vllm_gb10_cluster.md](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm_gb10_cluster.md) へ移した。
-GB10を2台並べ、LiteLLMを前に置いてClaude Codeから2つのモデルを切り替える手順（旧 `docs/proxy/`）は
-Batch_Exec リポジトリの [docs/other/proxy/](https://github.com/Hide369/Batch_Exec/tree/main/docs/other/proxy) へ移した。
-vLLM関係の文書（旧 `docs/vllm/` の4本）も Batch_Exec リポジトリの [docs/other/vllm/](https://github.com/Hide369/Batch_Exec/tree/main/docs/other/vllm) へ移した。
-GB10のデスクトップに直接キーボードを繋いで使うとき、テキスト欄で日本語が打てないのは
-IMEが未導入だからである。その手当ては
-[docs/gb10-japanese-input.md](docs/gb10-japanese-input.md) にある。
-
-再開するときに最初に当たるのはここである。**`.env` の `OLLAMA_HOST` にvLLMのURLを
-入れても動かない。** このアプリは `ingest/chat.py` が `/api/chat`、
-`ingest/embedder.py` が `/api/embed` と、Ollamaのネイティブapiを直接叩いている。
-vLLMが出すのはOpenAI互換の `/v1/...` だけで、これらのパスは存在しない。
-接続先を切り替える実装は、取り込まずに閉じた
-[PR #75](https://github.com/Hide369/local-llm-rag/pull/75) に残っている。
-改修せずに済ませるなら、GB10側にOllamaも入れてRAGはそのまま繋ぎ、vLLMは
-コーディングエージェント用に使う形になる。
+- 社内のクライアントPCのClaude Code（VS Code拡張）から、GB10の `gpt-oss-120b` と社内資料の
+  検索（MCP）を使う手順: [docs/claude-code-gb10.md](docs/claude-code-gb10.md)
+- 設計: [docs/superpowers/specs/2026-11-22-vllm-backend-design.md](docs/superpowers/specs/2026-11-22-vllm-backend-design.md)
+- DBはOllama版のbge-m3製をそのまま使える見込みだが、本番のDBを切り替える前に
+  `scripts/check_embedding_compat.py` で一致を確かめる（手順は配置手順書）。
+- GB10のデスクトップに直接キーボードを繋いで使うとき、テキスト欄で日本語が打てないのは
+  IMEが未導入だからである。その手当ては [docs/gb10-japanese-input.md](docs/gb10-japanese-input.md) にある。
 
 ## フォーマットファイルから文書を作る（Cowork）
 
@@ -609,12 +603,10 @@ Colabの `gpt-oss:20b` をVS Codeのコーディングエージェントとし�
 [GB10のOllamaでコーディングエージェントを動かす](docs/gb10-coding-agent.md) を参照する
 （**クライアントにOllamaもPythonも入れない**構成で、設定ファイル2つを手で置く）。
 Codexではなく Claude Code を同じGB10へ向ける手順は
-[VS CodeのClaude CodeをGB10へ向ける](docs/claude-code-gb10.md) にある（LiteLLM を変換
-プロキシとして挟む旧手順）。
-Qwen3-Coder-Next に置き換えたGB10へ、プロキシを立てずに Claude Code を直接繋ぐ手順は
-[VS CodeのClaude CodeをGB10のQwen3-Coder-Nextへ向ける](docs/qwen/claude-code-gb10-qwen3-coder-next.md)
-にある（Ollama v0.14.0 以降は `/v1/messages` を自分で話す。クライアントは `settings.json` だけ）。
-OllamaではなくvLLMに `openai/gpt-oss-120b` を載せ、CodexとClaude Codeの両方を使う場合は
+[VS CodeのClaude CodeをGB10へ向ける](docs/claude-code-gb10.md) にある（vLLMの `/v1/messages` へ直結し、
+MCPで社内資料も引く手順。変換プロキシは要らない）。
+Ollama時代の旧手順は [docs/qwen/](docs/qwen/) にある（GB10にOllamaを置かない現在の構成では使えない）。
+vLLMに `openai/gpt-oss-120b` を載せ、CodexとClaude Codeの両方を使う場合は
 [GB10のvLLM + gpt-oss-120b でCodexとClaude Codeを使う](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm/vllm-gb10-coding-agent.md)
 を参照する。
 Claude Code にプラグイン Superpowers を入れて使う手順と、ローカルLLMでの注意点は
@@ -671,7 +663,7 @@ BM25索引とベクトル行列は `chunks` から作る。
 | `OCR_MIN_CHARS` | 30 | `ingest/parsers/pdf_parser.py` |
 | `OCR_DPI` | 200 | `ingest/ocr.py` |
 | `EMBED_BATCH_SIZE` | 8 | `ingest/embedder.py` |
-| `DEFAULT_OLLAMA_HOST` | `http://127.0.0.1:11434` | `ingest/embedder.py` |
+| `_URL_DEFAULTS`（`VLLM_CHAT_URL` / `VLLM_EMBED_URL` / `VLLM_VLM_URL`） | `:8001` / `:8002` / `:8003` | `ingest/vllm_config.py` |
 | `RELEVANCE_THRESHOLD` | 0.50 | `ingest/retrieval.py` |
 | `CANDIDATE_COUNT` | 30 | `ingest/retrieval.py` |
 | `RRF_K` | 60 | `ingest/retrieval.py` |
@@ -691,9 +683,9 @@ BM25索引とベクトル行列は `chunks` から作る。
 
 ## モデルの比較
 
-回答生成のモデルは画面では選べず、`rag_web/app.py` の `CHAT_MODEL`（現在は
-`gpt-oss:20b`）で固定している。別のモデルを使うときは、先に `ollama pull` してから
-`CHAT_MODEL` を書き換える。
+回答生成のモデルは画面では選べず、`rag_web/app.py` の `VLLM_CHAT_MODEL`（既定
+`gpt-oss-120b`）で決まる。別のモデルを使うときは、そのモデルをvLLMで起動し、
+`--served-model-name` と `VLLM_CHAT_MODEL` を合わせる。
 
 下の表は `qwen2.5:7b-instruct` と `llama3.1:8b` を同じ経路（条件抽出→絞り込み／
 検索→生成）で4回ずつ実測した記録である（2026-08-13）。**どちらも現在の `CHAT_MODEL` では
@@ -834,7 +826,7 @@ BM25索引とベクトル行列は `chunks` から作る。
   しないため（本文冒頭「対象はPDF/PPTXの埋め込み画像だけでは…」節参照）、この
   報告はいつも空になる。Web画面経由の取り込みも、VLMに接続できないときは
   `caption_image=None` で走るため同じことが起きる。しかもGUI利用者がこれに
-  遭遇しやすいのはまさにVLMが使えないとき（Ollama未起動・モデル未pull）であり、
+  遭遇しやすいのはまさにVLMが使えないとき（vLLM未起動・モデル名の不一致）であり、
   「画像参照が見つからなかった」という報告が出ないことを「見つかった」の意味に
   取り違えないこと。
 - **Markdownの画像参照は、mdファイル自身があるディレクトリからの相対パスとして

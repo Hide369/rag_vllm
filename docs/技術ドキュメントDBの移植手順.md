@@ -2,7 +2,7 @@
 
 別のマシンで `docs_store.sqlite3`（画面の「検索対象 → 技術ドキュメント」が引くDB）を
 用意するための手順である。社内資料側の `vector_store.sqlite3` はこの手順では扱わない
-（配置手順は [サーバー配置の案内](server-deployment.md) にあり、書き直しの予定）。
+（配置手順は [GB10 への配置手順](server-deployment.md)）。
 
 **所要**: 作り直すなら1時間前後、DBをコピーするなら数分。
 
@@ -11,9 +11,9 @@
 | | A. 移植先で取り込む | B. DBをコピーする |
 |---|---|---|
 | 所要 | 1時間前後 | 数分（340MBの転送） |
-| 要るもの | Ollama + `bge-m3` | ファイルを運ぶ手段 |
+| 要るもの | 埋め込みの vLLM（`bge-m3`） | ファイルを運ぶ手段 |
 | 向くとき | DBを運べない／資料を最新にしたい | 手元と同じ状態をすぐ再現したい |
-| 注意 | 埋め込みの宛先だけは要る（`OLLAMA_HOST`） | `docs_store.sqlite3` は `.gitignore` 済みで git には乗らない |
+| 注意 | 埋め込みの宛先だけは要る（`VLLM_EMBED_URL`） | `docs_store.sqlite3` は `.gitignore` 済みで git には乗らない |
 
 **迷ったら B。** 取り込みは冪等なので、あとから A を走らせて更新できる。
 
@@ -50,24 +50,24 @@
 ## 1. 前提の確認
 
 - Python 3.13 の仮想環境（`rag_env`）
-- Ollama が動いていること
+- 埋め込みの vLLM が動いていること
 - **埋め込みモデル `bge-m3`**（1024次元）。取り込みに必須
 
 ```powershell
 .\rag_env\Scripts\python.exe -m pip install -r requirements.txt
-ollama pull bge-m3
 ```
 
-回答生成の `gpt-oss:20b` は**取り込みには要らない**。画面を使うときに要る。
+bge-m3 の vLLM の立て方は [GB10 への配置手順](server-deployment.md)（開発機は README「ColabのL4でvLLMを試す」の `chat+embed` の組）。
+回答生成のvLLM（`gpt-oss`）は**取り込みには要らない**。画面を使うときに要る。
 
 ### 接続先（`.env`）
 
-既定は `http://127.0.0.1:11434` で、手元のOllamaを使うならこの節は飛ばしてよい。
-別のマシン（ColabのL4など）のOllamaを使う場合だけ、リポジトリ直下に `.env` を置く。
+既定は `http://127.0.0.1:8002`（埋め込み）で、手元のvLLMを使うならこの節は飛ばしてよい。
+別のマシン（ColabのL4やGB10）のvLLMを使う場合だけ、リポジトリ直下に `.env` を置く。
 
 ```
-OLLAMA_HOST=https://example.ngrok-free.dev
-OLLAMA_API_KEY=<認証つきプロキシを挟んでいる場合だけ>
+VLLM_EMBED_URL=https://example.ngrok-free.dev/embed
+VLLM_API_KEY=<認証つきプロキシを挟んでいる場合だけ>
 ```
 
 `localhost` とは書かないこと。Windowsでは先にIPv6の `::1` に解決され、1リクエスト
@@ -76,10 +76,10 @@ OLLAMA_API_KEY=<認証つきプロキシを挟んでいる場合だけ>
 疎通を先に確かめる。**取り込みを始めてから落ちるのを防ぐため、ここで必ず確認する。**
 
 ```powershell
-.\rag_env\Scripts\python.exe -c "from dotenv import load_dotenv; load_dotenv(); from ingest import embedder; print(embedder.OLLAMA_HOST); embedder.check_ollama(); print('OK')"
+.\rag_env\Scripts\python.exe -c "from dotenv import load_dotenv; load_dotenv(); from ingest import embedder; from ingest.vllm_config import load_vllm_settings; print(load_vllm_settings().embed_url); embedder.check_embedder(); print('OK')"
 ```
 
-`埋め込みモデル bge-m3 がありません` と出たら `ollama pull bge-m3` が済んでいない。
+`埋め込みモデル bge-m3 がサーバーにありません` と出たら、vLLM の `--served-model-name` と `VLLM_EMBED_MODEL` が食い違っているか、bge-m3 を起動していない。
 
 ## 2. 方法A: 移植先で取り込む
 
@@ -195,7 +195,7 @@ DB内の総チャンク数: 60914（本文58565種）
 ```
 
 関連21問で根拠が残ること、圏外11問が空になることを見る（実測 2026-09-13: どちらも全問で期待どおり）。
-**`gpt-oss:20b` が要る**（検索クエリを英語へ訳すため）。冒頭に出る `Ollama:` の行が
+**生成のvLLM（`gpt-oss`）が要る**（検索クエリを英語へ訳すため）。冒頭に出る `vLLM 生成:` の行が
 意図した宛先になっていることを必ず確かめること。
 
 **走らせる前にモデルを暖めること。** 実測: 起動直後の最初の呼び出しは99.6秒かかる。
@@ -208,17 +208,17 @@ DB内の総チャンク数: 60914（本文58565種）
 | 検索結果が全部空 | `--db` のパス違いで空のDBが作られた | `取り込み先:` の行に出る絶対パスを確認 |
 | 取り込みが進んでいないように見える | 差分判定に1ファイル0.7秒かかる | 待つ。標準出力はファイルへ流すとまとめて出るので `-u` を付けると流れが見える |
 | 資料を直したのに何も処理されない | 内容が変わっていない。取り込み**規則**を変えたときも差分では処理されない | `--force` を付ける |
-| `401` / `404` が返る | 認証つきプロキシ、またはトンネルが落ちた | `OLLAMA_API_KEY` を確認。Colab経由なら起動し直す |
-| 翻訳が効かない（`check_retrieval`） | `gpt-oss:20b` が宛先に無い、またはモデルの読み込み待ち | 冒頭の `Ollama:` の行を確認。先に1回叩いて暖める |
+| `401` / `404` が返る | 認証つきプロキシ、またはトンネルが落ちた | `VLLM_API_KEY` を確認。Colab経由なら起動し直す |
+| 翻訳が効かない（`check_retrieval`） | 生成のモデルが宛先に無い、またはモデルの読み込み待ち | 冒頭の `vLLM 生成:` の行を確認。先に1回叩いて暖める |
 | Ctrl+C で止めたのに処理が続く | シェルだけが落ちてPythonが残ることがある | `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` で確認して止める |
 | コード例が途中で切れる | `--keep-code-blocks` の付け忘れ | 付け直して `--force` で入れ直す |
 
 ## 6. オフラインの移植先
 
 外部へ出るのは **2-1 の `fetch_docs` だけ**である。`docs_source/`（23MB）ごと持ち込め
-ばこの手順は不要になり、取り込みが触る外部は `OLLAMA_HOST` だけになる。
+ばこの手順は不要になり、取り込みが触る外部は `VLLM_EMBED_URL` だけになる。
 
-方法Bなら外部通信は一切要らない（画面を使うときのOllamaを除く）。
+方法Bなら外部通信は一切要らない（画面を使うときのvLLMを除く）。
 
 ## 付録: いま入っているもの
 
