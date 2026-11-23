@@ -274,6 +274,10 @@ class NotebookAccessError(Exception):
     """google.colab.userdata.NotebookAccessError の代わり（シークレットへのアクセス未許可）。"""
 
 
+class TimeoutException(Exception):
+    """google.colab.userdata.TimeoutException の代わり（Colab UI 以外、または許可の確認に未応答）。"""
+
+
 def _run_ngrok_cell(monkeypatch, *, secret, typed="typed-token", calls=None):
     """ngrok セルを偽の pyngrok / getpass / google.colab.userdata で実行し、呼び出し記録を返す。
 
@@ -309,6 +313,7 @@ def _run_ngrok_cell(monkeypatch, *, secret, typed="typed-token", calls=None):
     userdata = types.ModuleType("google.colab.userdata")
     userdata.SecretNotFoundError = SecretNotFoundError
     userdata.NotebookAccessError = NotebookAccessError
+    userdata.TimeoutException = TimeoutException
 
     def get(name):
         assert name == "NGROK_AUTHTOKEN"
@@ -357,7 +362,8 @@ def test_ngrok_cell_uses_colab_secret_without_prompting(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "secret", [SecretNotFoundError("missing"), NotebookAccessError("denied"), ""]
+    "secret",
+    [SecretNotFoundError("missing"), NotebookAccessError("denied"), TimeoutException("timed out"), ""],
 )
 def test_ngrok_cell_falls_back_to_prompt_when_secret_unavailable(monkeypatch, secret):
     calls = _run_ngrok_cell(monkeypatch, secret=secret, typed=" typed-token ")
