@@ -2,14 +2,13 @@
 
 design: docs/superpowers/plans/2026-09-11-image-ingestion.md の Task 11
 
-Streamlit 1.61 は mermaid を同梱しており（streamlit/static/static/js/ に
-architectureDiagram 等が入っている）、```mermaid フェンスは図として描画される。
-マークダウンも st.write が描画する。どちらも「レンダリング後」しか画面に出ず、
+画面は ```mermaid フェンスを図として、マークダウンを描画後の見た目で出す。
+どちらも「レンダリング後」しか画面に出ず、
 記法を見たい・他所へ持ち出したい利用者はそれを取り出せない。
 
 UIからしか呼ばれないが、UIには依存しない。ingest/prompting.py と同じ理由で
-ここに置く。Streamlitスクリプトに書くと、テストがインポートしただけで
-スクリプト全体が走り本番DBを開いてしまう。
+ここに置く。UIの入口に書くと、テストがインポートしただけで本番DBを開く
+経路に巻き込まれる。
 """
 import re
 

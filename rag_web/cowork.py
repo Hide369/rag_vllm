@@ -1,8 +1,6 @@
 """Cowork（雛形からの文書生成・雛形なしの生成）を、画面に依存しない関数にする。
 
-rag_chat_app.py の _collect_evidence / _generate_document / _generate_freeform と
-生成ブロックの Cowork 分岐を移したもの。順序・分岐・利用者に見せる文言は元のまま
-揃え、st.session_state.cowork_result へ積んでいた結果を戻り値の dict にした。
+根拠の収集・雛形からの生成・雛形なしの生成を順に行い、結果を戻り値の dict にする。
 描き方（警告を畳む、空のヒットを出さない等）は呼び出し側の仕事である。
 
 rag_web.app を import しない。app がこのモジュールを使うため、循環する。モデル名は
@@ -172,8 +170,7 @@ def _collect_evidence(
     question = request.question
     sources = []
     # リランカーの確認は1回の生成で1度だけ行う。失敗は覚えず呼ぶたびに再確認する
-    # ため、コーパスごとに呼ぶと確認の失敗を二重に払うことになる（Streamlit 版も
-    # 1回の実行で1度だけ評価していた）。
+    # ため、コーパスごとに呼ぶと確認の失敗を二重に払うことになる。
     rerank = corpora.rerank_callable() if request.use_internal or request.use_docs else None
     try:
         if request.use_internal:
@@ -249,8 +246,7 @@ def _collect_evidence(
 def _attachment_path(workspace: Path, name: str) -> Path:
     """添付を書く一時パス。
 
-    名前はブラウザーから来る。Streamlit の UploadedFile と違い区切りや ".." を
-    含みうるため、一時フォルダの外へ書かないよう、ファイル名でなければ拒む。
+    名前はブラウザーから来る。区切りや ".." を含みうるため、一時フォルダの外へ書かないよう、ファイル名でなければ拒む。
     """
     if name != Path(name).name or name in ("", ".", ".."):
         raise ValueError("ファイル名ではありません")

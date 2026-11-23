@@ -95,7 +95,7 @@ def test_object_labels_are_collected_too(compressed_path):
 
 
 def test_html_in_a_label_is_stripped(compressed_path):
-    """タグを残すと索引にも入り、Streamlitの画面にも文字として出る。"""
+    """タグを残すと索引にも入り、画面にも文字として出る。"""
     text = parse_drawio(compressed_path)[0].text
 
     assert "<b>" not in text

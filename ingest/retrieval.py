@@ -189,7 +189,7 @@ def contextual_query(question: str, history) -> str:
     LLMによる書き換えを使わないのは、1問あたり数秒の追加コストを避けるため。
     llama3.1:8b はこのPCで8トークン毎秒しか出ない。
 
-    history は Streamlit の会話履歴（role/content の辞書の並び）で、今回の質問は
+    history は画面の会話履歴（role/content の辞書の並び）で、今回の質問は
     含めない。
     """
     previous = next(

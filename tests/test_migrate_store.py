@@ -142,8 +142,8 @@ def test_migration_returns_1_on_validation_failure_and_leaves_original_untouched
 def test_rejecting_an_old_store_does_not_leak_the_connection(tmp_path, monkeypatch):
     """例外で抜けるときも接続を閉じる。
 
-    CLIは即終了するので漏れても気づけない。気づくのは Streamlit の
-    @st.cache_resource で、例外のたびに開き直すためリロードごとに
+    CLIは即終了するので漏れても気づけない。気づくのは常駐する
+    Webサーバーで、例外のたびに開き直すためリクエストごとに
     ファイルハンドルが積み上がる。
     """
     path = tmp_path / "old.sqlite3"

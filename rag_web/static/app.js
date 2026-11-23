@@ -1,6 +1,6 @@
 "use strict";
 
-// 社内文書RAG の画面。rag_chat_app.py（Streamlit）のチャットとサイドバーを置き換える。
+// 社内文書RAG の画面。チャット・Cowork・サイドバー（資料の取り込みと管理）を描く。
 // 回答と資料の本文はどちらも信頼しない入力として扱う。HTML として入れるのは
 // Markdown を描画して DOMPurify を通したものだけで、ほかは textContent で入れる。
 
@@ -273,7 +273,7 @@ function codeBlock(text, language) {
   return el("div", { className: "codebox" }, button, el("pre", {}, code));
 }
 
-// 回答の本文を描く。rag_chat_app.py の render_answer と同じ振る舞い:
+// 回答の本文を描く:
 // 記法で頼まれたとき（display あり）はコピーボタン付きのコードブロックで出し、mermaid なら
 // その下に図も描く。頼まれていなければ Markdown として描き、```mermaid フェンスは図にする。
 function renderAnswer(container, text, display) {
@@ -300,7 +300,7 @@ function renderPartial(container, text) {
   container.replaceChildren(...renderMarkdown(text).childNodes);
 }
 
-// 根拠の表示。rag_chat_app.py の render_evidence / render_hits と同じ構成にする。
+// 根拠の表示。表（条件に合う機種）、続けて検索ヒットの順に並べる。
 function renderEvidence(hits, table) {
   const nodes = [];
   if (table) {
@@ -676,7 +676,7 @@ async function ask(question) {
   }
   if (finished.error) {
     // 途中まで届いた回答は消さずに残し、その下にエラーを出す。履歴にはエラー文を残す
-    // （Streamlit 版と同じく assistant の発言として）
+    // （assistant の発言として）
     try {
       if (answer) renderPartial(answerBox, answer);
       else answerBox.replaceChildren();
@@ -723,7 +723,7 @@ $("question").addEventListener("keydown", (event) => {
 });
 
 // --- Cowork（文書生成） ----------------------------------------------------------------------
-// rag_chat_app.py の Cowork の入力欄・render_cowork_result と同じ振る舞いにする。
+// Cowork の入力欄と生成結果の表示。
 // 雛形名・印・理由・生成結果の文言はどれも信頼しない入力なので、すべて textContent で入れる。
 
 function setOptions(select, values, labelOf = (value) => value) {
@@ -733,7 +733,7 @@ function setOptions(select, values, labelOf = (value) => value) {
   if (values.includes(previous)) select.value = previous;
 }
 
-// 雛形を選んだ回は出力形式を使わない。Streamlit 版と同じく先頭の形式とみなす
+// 雛形を選んだ回は出力形式を使わない。先頭の形式とみなす
 function effectiveOutputSuffix() {
   const options = state.coworkOptions;
   return $("cowork-template").value ? options.output_suffixes[0] : $("cowork-output-suffix").value;
@@ -822,7 +822,7 @@ function renderCoworkResult(container, result) {
   for (const message of result.errors) container.append(el("div", { className: "msg error", textContent: message }));
   if (result.warnings.length) {
     // 黄色の枠で並べると生成のたびに画面が警告で埋まり、ダウンロードが下へ押し流される
-    // （rag_chat_app.py の render_cowork_result）。捨てずに畳んだ中へ普通の文で出す。
+    // 。捨てずに畳んだ中へ普通の文で出す。
     const details = el("details", { className: "evidence" },
       el("summary", { textContent: `補足（${result.warnings.length}件）` }));
     for (const message of result.warnings) details.append(el("p", { className: "warning-text", textContent: message }));
@@ -894,7 +894,7 @@ function clearTemplateMessages() {
 }
 
 function templateLabel(item) {
-  // rag_chat_app.py の template_dialog と同じ書き方。印が無ければ「なし」
+  // 印が無ければ「なし」
   if (item.error !== null) return `${item.name} — 開けません: ${item.error}`;
   return `${item.name} — 印 ${item.placeholders.length}個: ${item.placeholders.join("、") || "なし"}`;
 }
@@ -972,7 +972,7 @@ for (const radio of document.querySelectorAll("input[name=corpus]")) {
     if (!radio.checked || state.generating) return;
     state.corpus = radio.value;
     // 履歴を残すと、前の検索対象向けの質問が検索語に継ぎ足されて検索ごと壊れる
-    // （rag_chat_app.py のコーパス切り替えのコメント参照）。消したことは画面に出す。
+    // 。消したことは画面に出す。
     if (state.history.length) {
       clearChat();
       show("corpus-msg", "検索対象を切り替えたため、会話履歴をリセットしました。");

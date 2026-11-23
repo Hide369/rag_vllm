@@ -59,7 +59,7 @@ from ingest.retrieval import (
 
 DB_PATH = store.DB_PATH
 
-# 検索クエリの英訳に使うモデル。rag_chat_app.py の MODELS と揃える。実行時と
+# 検索クエリの英訳に使うモデル。rag_web/app.py の CHAT_MODEL と揃える。実行時と
 # 違うモデルで訳すと、実行時には存在しないクエリでしきい値を決めることになる。
 DEFAULT_MODEL = "gpt-oss:20b"
 
@@ -197,7 +197,7 @@ DOCS_RELEVANT = (
 # 測定が通ることと、正しい資料が出ることは別である。
 #
 # 1位であることまでは求めない。アプリが生成に渡すのは上位 SEARCH_RESULT_COUNT
-# 件であり（rag_chat_app.py）、実害は「LLMが見る材料に正しい資料が無い」ことで
+# 件であり（rag_web/answering.py）、実害は「LLMが見る材料に正しい資料が無い」ことで
 # 決まる。順位まで固定すると、実害の無い入れ替わりで赤が出る。
 #
 # 資料の粒度に合わせて書く。1ファイルで来るものはファイル名、ディレクトリで
@@ -327,7 +327,7 @@ class Corpus:
     regression_expected: str
     ingest_command: str
     # 検索の直前に英語へ訳すか。技術ドキュメントは英語で書かれており、
-    # rag_chat_app.py は ingest/query_translation.py を通してから search() を
+    # アプリ（rag_web/answering.py）は ingest/query_translation.py を通してから search() を
     # 呼ぶ。訳さずに測ると、実行時には存在しないクエリでしきい値を決めることに
     # なる。
     translate: bool = False
@@ -434,7 +434,7 @@ def _lexical_best(collection, index, question):
 def translator(corpus, ask):
     """質問 → 実際に検索へ渡る文字列 の変換を返す。
 
-    技術ドキュメントは英語で書かれており、rag_chat_app.py は search() を呼ぶ
+    技術ドキュメントは英語で書かれており、アプリ（rag_web/answering.py）は search() を呼ぶ
     直前に ingest/query_translation.py で質問を英語へ訳す。ここで同じ変換を
     通さないと、実行時には存在しないクエリでしきい値を決めることになる。
 

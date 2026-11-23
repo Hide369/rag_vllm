@@ -32,7 +32,7 @@
   header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
            padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
   header h1 { margin: 0; font-size: 17px; }
-  /* 左に設定欄（Streamlit のサイドバー）、右にチャット。幅が狭いときは縦に積む */
+  /* 左に設定欄（サイドバー）、右にチャット。幅が狭いときは縦に積む */
   .page { max-width: 1400px; margin: 0 auto; padding: 16px; display: grid; gap: 16px;
           grid-template-columns: minmax(0, 300px) minmax(0, 1fr); align-items: start; }
   @media (max-width: 900px) { .page { grid-template-columns: minmax(0, 1fr); } }
@@ -110,7 +110,7 @@
   #chat-form { display: grid; gap: 6px; position: sticky; bottom: 0; background: var(--panel); padding-top: 8px; }
   .input-row { display: flex; gap: 8px; align-items: flex-end; }
   #question { flex: 1; min-width: 0; resize: vertical; min-height: 42px; }
-  /* チャット / Cowork の切り替え（Streamlit の segmented_control） */
+  /* チャット / Cowork の切り替え（セグメントボタン） */
   .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
                justify-self: start; margin: 0; padding: 0; }
   .segmented label { position: relative; margin: 0; padding: 3px 14px; cursor: pointer; gap: 0; }

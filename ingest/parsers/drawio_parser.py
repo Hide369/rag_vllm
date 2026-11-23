@@ -21,7 +21,7 @@ from xml.etree import ElementTree
 from ingest.models import DIAGRAM, ParsedUnit
 
 # ラベルにはHTMLが入る（実測: '<b>受注</b><br>登録'）。落とさないとタグの文字列が
-# そのまま索引され、StreamlitのMarkdownにも文字として出る（answer_text が
+# そのまま索引され、画面のMarkdownにも文字として出る（answer_text が
 # 回答側で同じ問題を扱っている）。
 _TAG = re.compile(r"<[^>]+>")
 

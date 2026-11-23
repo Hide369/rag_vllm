@@ -25,7 +25,6 @@ numpy==2.5.2
 
 # チャンク分割・UI。ベクトルの保管は標準ライブラリの sqlite3 で行うため依存は増えない
 langchain-text-splitters==1.1.2
-streamlit==1.61.1
 
 # Ollamaへのアクセスと設定
 requests==2.32.3

@@ -376,16 +376,6 @@ def test_status_of_an_empty_docs_corpus_carries_the_ingest_command(client):
     assert "scripts.ingest_source" in docs["docs_ingest_command"]
 
 
-def test_docs_ingest_command_matches_streamlit_app():
-    source = Path(__file__).resolve().parent.parent / "rag_chat_app.py"
-    flattened = "".join(
-        line.strip().strip('"')
-        for line in source.read_text(encoding="utf-8").splitlines()
-        if line.strip().startswith('"')
-    )
-    assert DOCS_INGEST_COMMAND in flattened
-
-
 def test_chat_streams_ndjson_events(client, fake):
     response = client.post("/api/chat", json=_chat_body(), headers=CSRF)
     assert response.status_code == 200
@@ -432,7 +422,7 @@ def test_chat_rejects_system_role_and_oversized_history(client, fake):
 
 
 def test_chat_accepts_long_question(client, fake):
-    # Streamlit 版には質問の長さの上限が無かった。資料を貼って尋ねる長さは通す。
+    # 資料を貼って尋ねる長さは通す。
     response = client.post("/api/chat", json=_chat_body(question="あ" * 4001), headers=CSRF)
     assert response.status_code == 200
     assert json.loads(response.text.splitlines()[-1])["type"] == "done"
@@ -749,7 +739,7 @@ def test_index_has_no_model_picker():
 
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
-    # 見出し・ラベルは Streamlit 版（rag_chat_app.py）と同じ文言にする。
+    # 見出し・ラベルの文言を固定する。
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     for element_id in (
         "mode-chat", "mode-cowork", "cowork-panel", "cowork-template", "open-templates",

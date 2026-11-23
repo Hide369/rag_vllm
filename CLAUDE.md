@@ -7,7 +7,7 @@
 しないこと。追記は `AGENTS.md` 側へ行い、Claude Code だけに効かせたいものだけを
 この節に書く。
 
-- 共通ガイドラインの PowerShell コマンドと仮想環境（`myvenv313`）はそのまま使える。
+- 共通ガイドラインの PowerShell コマンドと仮想環境（`rag_env`）はそのまま使える。
 - `.agents/skills/` は Codex 向けの配置である。Claude Code から同じ superpowers
   スキルを使う場合はプラグインを導入し、`superpowers:brainstorming` のように
   `superpowers:` 付きで呼ぶ。`$skill-name` 記法は Codex のものである。

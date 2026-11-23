@@ -1,4 +1,4 @@
-"""Web 画面（FastAPI）。rag_chat_app.py（Streamlit）のチャットとサイドバーの置き換え。
+"""Web 画面（FastAPI）。チャット・Cowork・サイドバー（資料の取り込みと管理）の API と静的ファイルの配信。
 
 - 閲覧・チャット・アップロード・アップロード済み資料の削除は誰でもできる（ログイン不要）
 - 社内資料の差分取り込み（POST /api/ingest）だけは管理者ログインが要る
@@ -62,8 +62,7 @@ VENDOR_DIR = STATIC_DIR / "vendor"
 # これ1つだけで、選択肢を出しても利用者に選ぶ意味がないため）。変えるときはここを直す。
 CHAT_MODEL = "gpt-oss:20b"
 
-# 段階③で Streamlit 版（rag_chat_app.py）を消すまでの一時的な重複。値は同じに保つ
-# （tests/test_web_app.py が一致を確かめる）。
+# 社内資料以外（技術ドキュメント）のコーパスが空のとき、画面に示す取り込みコマンド。
 DOCS_INGEST_COMMAND = (
     "python -m scripts.fetch_docs のあと "
     "python -m scripts.ingest_source --source-dir docs_source "
@@ -120,8 +119,8 @@ class Message(BaseModel):
 class ChatBody(BaseModel):
     corpus: Corpus
     temperature: float = Field(ge=0, le=1)
-    # 上限は履歴1件と同じ。Streamlit 版には上限が無く、長い資料を貼って尋ねる使い方を
-    # 狭めないため、異常に大きい入力だけを弾く値にしている。
+    # 上限は履歴1件と同じ。長い資料を貼って尋ねる使い方を狭めないため、
+    # 異常に大きい入力だけを弾く値にしている。
     question: str = Field(min_length=1, max_length=100_000)
     history: list[Message] = Field(max_length=100)
 
@@ -248,7 +247,7 @@ def _template_items(services: Services) -> list[dict]:
         except Exception as error:
             # templates.register は拡張子しか見ないため、中身が壊れた雛形も登録
             # できてしまう。ここで落とすと、その雛形を消せる唯一の画面ごと出せなく
-            # なるため、理由を添えて一覧に残す（rag_chat_app.py の template_dialog と同じ）。
+            # なるため、理由を添えて一覧に残す（画面の雛形一覧もこの行を出す）。
             items.append({"name": path.name, "placeholders": None, "error": str(error)})
         else:
             items.append({"name": path.name, "placeholders": names, "error": None})
@@ -321,7 +320,7 @@ def create_app(
             raise HTTPException(401, "管理者としてログインしてください")
 
     def require_ollama() -> None:
-        # 取り込みを始めてから落ちるのを防ぐ。CLI・Streamlit 版と同じ確認。
+        # 取り込みを始めてから落ちるのを防ぐ。CLI と同じ確認。
         try:
             services.check_ollama()
         except EmbeddingError as e:

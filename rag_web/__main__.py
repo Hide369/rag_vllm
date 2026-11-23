@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 def main() -> int:
     # OLLAMA_HOST を ingest.embedder がインポート時に読むため、ingest を取り込む
-    # rag_web.app などより先に .env を読み込む必要がある（rag_chat_app.py 冒頭と同じ理由）。
+    # rag_web.app などより先に .env を読み込む必要がある（ingest 側の設定は import 時に決まる）。
     # そのため .settings / .auth / .app はここで遅延インポートする。
     load_dotenv()
 

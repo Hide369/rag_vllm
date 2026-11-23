@@ -1,7 +1,7 @@
 """プロンプト組み立てと取り込み結果の要約。
 
-UIから呼ばれるがUIには依存しない。Streamlitスクリプトに置くと、テストが
-インポートしただけでスクリプト全体が走り本番DBを開いてしまうため、ここに分離する。
+UIから呼ばれるがUIには依存しない。UIの入口に置くと、テストがインポートしただけで
+本番DBを開く経路に巻き込まれるため、ここに分離する。
 """
 import math
 
@@ -22,7 +22,7 @@ def build_prompt(question: str, hits) -> str:
     プロンプトが最後の砦になる。
 
     出典は文脈に残すが、本文に書かせない（要望）。画面は畳み込み
-    （rag_chat_app.py の render_hits）で出典を見せており、本文にも出ると
+    （rag_web/static/app.js の renderEvidence）で出典を見せており、本文にも出ると
     同じ情報が二重になる。文脈から出典ごと抜かないのは、複数チャンクの
     境目が消え、どの記述がどの資料のものかをモデルが取り違えるためである。
     指示を消すだけでなく明示的に禁じるのは、文脈が `[出典]
@@ -142,7 +142,7 @@ def format_report(report) -> str:
     for source, references in report.missing_images.items():
         lines.append(f"画像が見つかりません {source}: {'、'.join(references)}")
     # 全滅した資料はreport.droppedに載らない（落としていないため）。ここに
-    # 出しておかないと、on_progress を渡さない呼び出し元（Streamlitのサイドバー）
+    # 出しておかないと、on_progress を渡さない呼び出し元（Web画面の取り込み）
     # からは全滅の警告が見えないところで消える。
     if report.kept_all_navigation:
         lines.append(
