@@ -88,32 +88,40 @@ def _install_process_fakes(monkeypatch, *, process, models_status=200, log_text=
     return calls
 
 
-def test_gpu_check_rejects_non_l4_gpu(monkeypatch):
+def _run_gpu_check(monkeypatch, stdout):
     class Completed:
         returncode = 0
-        stdout = "Tesla T4, 15360 MiB\n"
         stderr = ""
 
+    Completed.stdout = stdout
     fake_subprocess = types.ModuleType("subprocess")
     fake_subprocess.run = lambda *args, **kwargs: Completed()
     monkeypatch.setitem(sys.modules, "subprocess", fake_subprocess)
-
-    with pytest.raises(RuntimeError, match="Tesla T4"):
-        exec(compile(_code_cell("# 1."), "gpu-check-cell", "exec"), {})
-
-
-def test_gpu_check_accepts_l4(monkeypatch, capsys):
-    class Completed:
-        returncode = 0
-        stdout = "NVIDIA L4, 23034 MiB\n"
-        stderr = ""
-
-    fake_subprocess = types.ModuleType("subprocess")
-    fake_subprocess.run = lambda *args, **kwargs: Completed()
-    monkeypatch.setitem(sys.modules, "subprocess", fake_subprocess)
-
     exec(compile(_code_cell("# 1."), "gpu-check-cell", "exec"), {})
-    assert "NVIDIA L4" in capsys.readouterr().out
+
+
+def test_gpu_check_rejects_gpu_smaller_than_l4(monkeypatch):
+    with pytest.raises(RuntimeError, match="Tesla T4"):
+        _run_gpu_check(monkeypatch, "Tesla T4, 15360 MiB\n")
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "NVIDIA L4, 23034 MiB\n",
+        # L4 が取れないときの代わり。セル0の割合はL4基準なので、大きいGPUでは余るだけ
+        "NVIDIA A100-SXM4-40GB, 40960 MiB\n",
+        "NVIDIA H100 80GB HBM3, 81559 MiB\n",
+    ],
+)
+def test_gpu_check_accepts_l4_or_larger(monkeypatch, capsys, stdout):
+    _run_gpu_check(monkeypatch, stdout)
+    assert stdout.split(",")[0] in capsys.readouterr().out
+
+
+def test_gpu_check_rejects_unreadable_memory(monkeypatch):
+    with pytest.raises(RuntimeError, match="メモリ"):
+        _run_gpu_check(monkeypatch, "NVIDIA L4, [N/A]\n")
 
 
 def _commands(calls):
@@ -186,6 +194,36 @@ def test_vlm_profile_starts_only_qwen3_vl_on_8003(tmp_path, monkeypatch):
     assert vlm[:3] == ["/content/vllm-env/bin/vllm", "serve", "Qwen/Qwen3-VL-8B-Instruct"]
     assert _option(vlm, "--port") == "8003"
     assert float(_option(vlm, "--gpu-memory-utilization")) <= 0.95
+
+
+def test_vlm_embed_profile_starts_vlm_first_then_bge_m3_within_one_gpu(tmp_path, monkeypatch):
+    # 取り込み（画像説明→埋め込み）は VLM と埋め込みを同時に要る
+    monkeypatch.chdir(tmp_path)
+    calls = _install_process_fakes(monkeypatch, process=FakeProcess())
+
+    namespace = _settings()
+    namespace["VLLM_PROFILE"] = "vlm+embed"
+    exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), namespace)
+
+    served = [
+        args[0][args[0].index("--served-model-name") + 1] for args, _ in calls["popen"]
+    ]
+    # 大きいほうを先に確保する。後から起動する側は空き容量を確かめて起動する
+    assert served == ["qwen3-vl-8b", "bge-m3"]
+
+    commands = _commands(calls)
+    vlm = commands["qwen3-vl-8b"]
+    assert _option(vlm, "--port") == "8003"
+    assert _option(commands["bge-m3"], "--port") == "8002"
+    fractions = [float(_option(command, "--gpu-memory-utilization")) for command in commands.values()]
+    assert sum(fractions) <= 0.90
+    # 埋め込みと同居するぶん文脈を縮めるので、大きな画像の視覚トークンに上限を付ける
+    assert int(_option(vlm, "--max-model-len")) == 8192
+    max_pixels = json.loads(_option(vlm, "--mm-processor-kwargs"))["max_pixels"]
+    assert max_pixels // (32 * 32) < 8192
+    assert json.loads(_option(vlm, "--limit-mm-per-prompt")) == {"video": 0}
+
+    assert set(namespace["vllm_procs"]) == {"vlm", "embed"}
 
 
 def test_unknown_profile_is_rejected():
@@ -536,6 +574,25 @@ def test_vlm_profile_proxy_routes_only_vlm(tmp_path, monkeypatch):
     }
 
 
+def test_vlm_embed_profile_proxy_routes_vlm_and_embed(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROXY_API_KEY", "test-runtime-key")
+    monkeypatch.chdir(tmp_path)
+    namespace = _settings()
+    namespace["VLLM_PROFILE"] = "vlm+embed"
+    exec(compile(_code_cell("# 5."), "proxy-generator-cell", "exec"), namespace)
+    install_proxy_fakes(monkeypatch, [])
+    module = types.ModuleType("vllm_proxy")
+    exec(
+        compile((tmp_path / "vllm_proxy.py").read_text(encoding="utf-8"), "vllm_proxy.py", "exec"),
+        module.__dict__,
+    )
+
+    assert {p: c.kwargs["base_url"] for p, c in module._clients.items()} == {
+        "vlm": "http://127.0.0.1:8003",
+        "embed": "http://127.0.0.1:8002",
+    }
+
+
 def test_proxy_rejects_missing_wrong_and_x_api_key_credentials_without_forwarding(
     tmp_path, monkeypatch
 ):
@@ -739,6 +796,17 @@ def test_env_cell_prints_only_vlm_settings_for_vlm_profile(capsys):
     assert "VLLM_VLM_URL=https://example.ngrok-free.app/vlm" in lines
     assert "VLLM_VLM_MODEL=qwen3-vl-8b" in lines
     assert not any(line.startswith(("VLLM_CHAT_", "VLLM_EMBED_")) for line in lines)
+
+
+def test_env_cell_prints_vlm_and_embed_settings_for_vlm_embed_profile(capsys):
+    _run_env_cell("https://example.ngrok-free.app", profile="vlm+embed")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "VLLM_VLM_URL=https://example.ngrok-free.app/vlm" in lines
+    assert "VLLM_VLM_MODEL=qwen3-vl-8b" in lines
+    assert "VLLM_EMBED_URL=https://example.ngrok-free.app/embed" in lines
+    assert "VLLM_EMBED_MODEL=bge-m3" in lines
+    assert not any(line.startswith("VLLM_CHAT_") for line in lines)
 
 
 def test_env_cell_does_not_write_any_file(tmp_path, monkeypatch):
