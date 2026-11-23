@@ -82,10 +82,10 @@ Colab 経由で使っている場合は、このリポジトリの診断が使�
 
 ```powershell
 # 接続・モデル能力（推論しない）
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --check
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --check
 
 # GPU配置・コンテキスト長・ツール往復を一度に見る
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --probe
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --probe
 ```
 
 `--check` の `capabilities` に `tools` があること、`--probe` の
@@ -112,7 +112,7 @@ nvidia-smi
 モデル自体に焼き込む。**Ollama を動かしている機械ごとに実行が要る。**
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --configure-context
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --configure-context
 ```
 
 焼かれているかは `/api/show` の `parameters` に `num_ctx` があるかで分かる。

@@ -29,7 +29,8 @@ class WebSettings:
     forwarded_allow_ips: str = "127.0.0.1"
     # anyio のスレッドプール（同期ルートを走らせる）の大きさ。
     threadpool_size: int = 40
-    # 同時に走らせる Cowork（文書生成）の数。1本ごとに添付と生成物がメモリに載る。
+    # 同時に走らせる Cowork（文書生成）の数の上限。メモリの上限ではない
+    # （終わった結果もジョブの保持期限まで残る）。
     max_cowork_jobs: int = 2
 
 

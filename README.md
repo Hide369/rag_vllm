@@ -8,11 +8,11 @@ Markdownのフロントマター由来のメタデータで機械的に絞り込
 
 ## 必要なもの
 
-- Python 3.13（`myvenv313`）
+- Python 3.13（`rag_env`）
 - Ollama（インストール直後の標準ポート `http://127.0.0.1:11434` で待ち受けていること）
 - モデル: `ollama pull bge-m3`（埋め込み）と `ollama pull gpt-oss:20b`（回答生成）
-  。生成モデルを別のものにするときは、pullしたうえで `rag_chat_app.py` の
-  `MODELS` に追記する（下記「モデルの比較」参照）
+  。生成モデルを別のものにするときは、pullしたうえで `rag_web/app.py` の
+  `CHAT_MODEL` を書き換える（下記「モデルの比較」参照）
 
 ### Ollamaの待ち受けポートについて
 
@@ -25,7 +25,7 @@ Markdownのフロントマター由来のメタデータで機械的に絞り込
 
 ```powershell
 $env:OLLAMA_HOST="http://127.0.0.1:12000"
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source
+.\rag_env\Scripts\python.exe -m scripts.ingest_source
 ```
 
 `localhost` は使わないこと。Windowsでは先にIPv6の `::1` に解決され、
@@ -33,12 +33,11 @@ $env:OLLAMA_HOST="http://127.0.0.1:12000"
 
 ## セットアップ
 
-Windowsサーバーへ配置し、別PCのブラウザーから利用する場合は、
-[Windowsサーバー配置手順](docs/server-deployment-windows.md) を参照する
-（既存の資料・ベクトルDBは移行しない構成）。
+別PCのブラウザーから利用するサーバー配置は、現在は行わない。GB10 への配置手順は
+vLLM への切り替えのときに書き直す（[docs/server-deployment.md](docs/server-deployment.md)）。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m pip install -r requirements.txt
+.\rag_env\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 各パッケージの用途、Ollamaで必要なモデル、自動ダウンロードされるOCR/リランカーの
@@ -67,22 +66,23 @@ XMLから図形のラベル文字を直接読む（ラベルはすでに構造�
 ```powershell
 # 初回の取り込み（実測 約24分。source/ 直下8ファイルとMarkdown 30ファイル、
 # 計38ファイル・496チャンクを処理した。OCR 23ページが時間の大半を占める）
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source
+.\rag_env\Scripts\python.exe -m scripts.ingest_source
 
 # Markdownだけを取り直す（フロントマターを直したときなど。OCRを伴わないため数十秒）
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .md
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .md
 
 # PPTXだけを取り直す（スライドの分割ロジックを直したときなど）
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx
 
 # PDF/PPTX内の図・写真もVLMで説明文化する（大幅に時間が伸びる。事前に
 # ollama pull qwen3-vl:8b が必要。ColabのL4に接続していればそちらで処理される）
 # チャット画面からの取り込みはこれを常に行う（下の「図表の説明文化」参照）。
 # CLIで選べるようにしてあるのは、初回の全量取り込みで外せるようにするためである
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --with-vlm
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --with-vlm
 
-# チャットを起動する
-.\myvenv313\Scripts\python.exe -m streamlit run rag_chat_app.py
+# チャット画面を起動する（詳しくは「Web画面の使い方」）
+.
+un_web.ps1
 ```
 
 検索結果は常にリランカー（`bge-reranker-v2-m3` のONNX INT8版）による並べ替えを
@@ -105,7 +105,7 @@ XMLから図形のラベル文字を直接読む（ラベルはすでに構造�
 消えてしまうためである。
 
 2回目以降はファイルのハッシュを見て変更分だけを処理するため数秒で終わる。
-UIサイドバーの「差分を取り込む」も同じ処理を呼ぶ。
+Web画面のサイドバーの「差分を取り込む」も同じ処理を呼ぶ（管理者ログインが要る）。
 
 ### 図表の説明文化（VLM）とOCR
 
@@ -161,8 +161,8 @@ CLIの `--with-vlm` はそのまま残してある。初回の全量取り込み
 対象拡張子を指定して強制的に入れ直す。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pdf --with-vlm
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx --with-vlm
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pdf --with-vlm
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx --with-vlm
 ```
 
 **この入れ直しにどれだけ待つかの実測**（2026-09-12、絞り込みなしで
@@ -204,11 +204,11 @@ ngrok経由でローカルから接続）で **2340秒（39分0秒、02:33:45Z�
 `source/` に `uploads/` という名前のサブフォルダを作ると資料キーが衝突するため、
 取り込みは明示的なエラーで止まる。別の名前を使うこと。
 
-なおDBもStreamlitプロセスも1つである。アップロードした資料は**全利用者の検索
+なおDBもWebアプリのプロセスも1つである。アップロードした資料は**全利用者の検索
 対象になる**。利用者ごとの分離はない（[docs/server-deployment.md](docs/server-deployment.md)）。
 
 ストアを作り直す場合はOCRを含む全ファイルを再処理するため、初回と同程度の時間
-（約24分）がかかる。取り込み中にStreamlitを開いたままでもよい。SQLiteの
+（約24分）がかかる。取り込み中にWeb画面を開いたままでもよい。SQLiteの
 トランザクションが1資料の入れ替えを不可分にしており、最悪でも「database is locked」
 という**表に出る**失敗になる。
 
@@ -218,7 +218,7 @@ ngrok経由でローカルから接続）で **2340秒（39分0秒、02:33:45Z�
 [ingest/navigation.py](ingest/navigation.py) にある。これらは短くキーワード密度が高いため
 検索で上位に来やすいが、中身が無く質問に答える根拠にはならない。
 
-除外した件数は取り込みの要約に出る（CLIの出力・Streamlitサイドバーの両方）。
+除外した件数は取り込みの要約に出る（CLIの出力・Web画面のサイドバーの両方）。
 見えないところで静かに消えることはない。全ユニットがナビゲーション判定になった
 資料は、規則の誤爆を疑うべき兆候として、除外せずに警告だけ出す。
 
@@ -227,7 +227,7 @@ ngrok経由でローカルから接続）で **2340秒（39分0秒、02:33:45Z�
 反映するには対象の拡張子を指定して強制的に入れ直す。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --force --only-suffix .pptx
 ```
 
 **除外の実測（2026-09-07）。** セミナー資料7本を入れ直した結果、DB内の総チャンク数は
@@ -250,24 +250,23 @@ BM25に床（フロア）を設けない判断（`ingest/retrieval.py`）が以�
 
 ### コマンドは必ず `python.exe -m` 経由で実行すること
 
-`streamlit.exe` や `pytest.exe` のようなランチャーは、venv作成時のPython絶対パスを
+`pytest.exe` や `uvicorn.exe` のようなランチャーは、venv作成時のPython絶対パスを
 実行ファイル内部に焼き込む。そのためプロジェクトフォルダを移動・改名すると
 `Fatal error in launcher: Unable to create process using '...'` で起動しなくなる。
 
 `python.exe` は自身の位置から環境を解決するため移動の影響を受けない。
-`python.exe -m streamlit` の形ならランチャーを経由しないので常に動く。
+`python.exe -m pytest` や `python.exe -m rag_web` の形ならランチャーを経由しないので常に動く。
 
-（このリポジトリの `myvenv313` は実際に `09_RAG_FineTuning\04_...` で作成された後に
+（`myvenv313` は過去の名前で、この仮想環境は実際に `09_RAG_FineTuning\04_...` で作成された後に
 移動されており、`pyvenv.cfg` の `command` 行に当時のパスが残っている。
 `python.exe` と `pythonw.exe` 以外の `Scripts\*.exe` は現在すべて壊れている。
 `.exe` を使えるようにしたい場合は該当パッケージを
 `python.exe -m pip install --force-reinstall --no-deps <package>` で入れ直す。）
 
-## 新しい画面（移行中・開発機で試用）
+## Web画面の使い方
 
-Streamlit の画面から FastAPI 製の画面（`rag_web/`）へ移行している。**本番の画面は
-段階3まで Streamlit のままで**、新しい画面は開発機で試すためのものである。上の
-Streamlit の手順は変わらない。
+チャット画面は FastAPI 製（`rag_web/`）である。サーバーへの配置は
+[docs/server-deployment.md](docs/server-deployment.md) の案内のとおり、まだ行わない。
 
 仮想環境は `rag_env`（Python 3.13）を使う。まだ無ければ作って依存を入れる。
 
@@ -299,7 +298,7 @@ py -3.13 -m venv rag_env
 
 管理者ログインが要るのは差分取り込みだけである。チャット・資料のアップロードと削除は
 ログインなしで使える（アップロードした資料は全員の検索対象になる）。
-入力欄の上の「チャット / Cowork」で Cowork に切り替えると、Streamlit 版と同じく
+入力欄の上の「チャット / Cowork」で Cowork に切り替えると、
 フォーマットファイルからの文書生成（登録・削除もログインなし）も使える。
 
 新しい画面ではモデルを選ばない。回答生成のモデルは `rag_web/app.py` の `CHAT_MODEL`
@@ -321,10 +320,10 @@ py -3.13 -m venv rag_env
 
 ```powershell
 # 1. 取得（外部通信あり。docs_sources.toml に書かれたURLだけ）
-.\myvenv313\Scripts\python.exe -m scripts.fetch_docs
+.\rag_env\Scripts\python.exe -m scripts.fetch_docs
 
 # 2. 取り込み（Ollama への接続が要る）
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --source-dir docs_source `
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --source-dir docs_source `
     --db docs_store.sqlite3 --keep-code-blocks
 ```
 
@@ -412,7 +411,7 @@ Task 1〜6を終えた時点では、この機能は**日本語の質問に対�
 
 そこで `ingest/query_translation.py` の `translate_query(query, ask)` が、
 検索にだけ使う英語の検索クエリへ質問を翻訳する。**回答の生成は原文の日本語
-質問のまま行う**（`rag_chat_app.py` は翻訳後のクエリを `search()` にだけ渡し、
+質問のまま行う**（`rag_web/` は翻訳後のクエリを `search()` にだけ渡し、
 `build_docs_prompt(question, hits)` には常に原文の `question` を渡す）。
 これが無いと、コーパスと質問の言語が食い違ったまま検索が成立せず、
 実装した機能全体が日本語話者に対して動かない。導入後の実測
@@ -437,7 +436,7 @@ Task 1〜6を終えた時点では、この機能は**日本語の質問に対�
 Ollamaに肩代わりさせられる。現在Colab側に置いているのは `gpt-oss:20b`（生成）・
 `bge-m3`（埋め込み）・`qwen3-vl:8b`（VLM）の3つで、合計してもL4の24GB VRAMに収まる。
 
-仕組みは単純で、[ingest/embedder.py](ingest/embedder.py) と [rag_chat_app.py](rag_chat_app.py)
+仕組みは単純で、[ingest/embedder.py](ingest/embedder.py) と [rag_web/](rag_web/)
 が接続先を環境変数 `OLLAMA_HOST` から読む既存の仕組みをそのまま使う。Colab側にOllamaと、
 `X-API-Key` ヘッダーで認証する軽量なリバースプロキシを立て、ngrokでその1ポートだけを
 外部公開する。
@@ -453,10 +452,11 @@ Ollamaに肩代わりさせられる。現在Colab側に置いているのは `g
 5. いつも通り起動する
 
    ```powershell
-   .\myvenv313\Scripts\python.exe -m streamlit run rag_chat_app.py
+   .
+un_web.ps1
    ```
 
-   サイドバーのモデル選択に関わらず、生成・埋め込みともにColab側のOllamaで処理される。
+   生成・埋め込みともにColab側のOllamaで処理される。
 
 **知っておくこと**
 
@@ -477,7 +477,7 @@ Ollamaに肩代わりさせられる。現在Colab側に置いているのは `g
 （`/v1/chat/completions` など）を手元から叩ける。ノートブック内に応答時間を計るセルと、
 PowerShell からの呼び出し例がある。
 
-- **RAGアプリはまだ動かない**: `rag_chat_app.py` と `ingest/` はOllamaのネイティブAPI
+- **RAGアプリはまだ動かない**: `rag_web/` と `ingest/` はOllamaのネイティブAPI
   （`/api/chat`・`/api/embed`・`/api/tags`）を使うため、このURLを `.env` に入れても
   回答生成・埋め込みは失敗する。RAG側の切り替えは今後の作業である。
 - 埋め込み（bge-m3）とVLM（qwen3-vl）はこのノートブックでは立てていない。
@@ -639,7 +639,7 @@ Claude Code にプラグイン Superpowers を入れて使う手順と、ロー�
 | `scripts/github_source.py` | `kind = "github"` — 公式リポジトリの生 Markdown を取る |
 | `scripts/local_source.py` | `kind = "local"` — リポジトリに置いた原本（`docs/pg_data/`）を写す。外部通信なし |
 | `ingest/query_translation.py` | 技術ドキュメント検索用に質問を英語へ翻訳する（生成には使わない） |
-| `rag_chat_app.py` | Streamlit UI |
+| `rag_web/` | FastAPI 製のWeb画面（`python -m rag_web`、起動は `run_web.ps1`） |
 
 ベクトルは `vector_store.sqlite3`（bge-m3 / 1024次元 / cosine）に保存する。1つの
 埋め込みモデルしか入らない設計で、モデルを差し替えるときはファイルごと消して
@@ -688,20 +688,19 @@ BM25索引とベクトル行列は `chunks` から作る。
 ## テスト
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m pytest            # 通常のテスト
-.\myvenv313\Scripts\python.exe -m pytest -m integration  # 実機のOCRを使う低速なテスト
+.\rag_env\Scripts\python.exe -m pytest            # 通常のテスト
+.\rag_env\Scripts\python.exe -m pytest -m integration  # 実機のOCRを使う低速なテスト
 ```
 
 ## モデルの比較
 
-回答生成のモデルはサイドバーのプルダウンで選ぶ。候補は `rag_chat_app.py` の
-`MODELS` に列挙したモデルだけで、現在は `gpt-oss:20b` の1つ。接続先のOllamaに
-置いてある生成モデルがこれだけだからである。別のモデルを使うときは、先に
-`ollama pull` してから `MODELS` に追記する。
+回答生成のモデルは画面では選べず、`rag_web/app.py` の `CHAT_MODEL`（現在は
+`gpt-oss:20b`）で固定している。別のモデルを使うときは、先に `ollama pull` してから
+`CHAT_MODEL` を書き換える。
 
 下の表は `qwen2.5:7b-instruct` と `llama3.1:8b` を同じ経路（条件抽出→絞り込み／
-検索→生成）で4回ずつ実測した記録である（2026-08-13）。**どちらも現在は `MODELS` に
-無いが、プロンプトの書き方を決めた根拠なので残してある。** `gpt-oss:20b` は
+検索→生成）で4回ずつ実測した記録である（2026-08-13）。**どちらも現在の `CHAT_MODEL` では
+なく、プロンプトの書き方を決めた根拠なので残してある。** `gpt-oss:20b` は
 動作確認のみで、同じ形式の実測はまだ無い。
 
 | | qwen2.5:7b-instruct | llama3.1:8b |
@@ -729,7 +728,7 @@ BM25索引とベクトル行列は `chunks` から作る。
 ## 既知の制約
 
 以下で `llama3.1:8b` / `qwen2.5:7b-instruct` を名指ししている項目は、そのモデルで
-取った実測の記録である。現在の `MODELS` は `gpt-oss:20b` だけなので**同じ症状が今も
+取った実測の記録である。現在の `CHAT_MODEL` は `gpt-oss:20b` なので**同じ症状が今も
 出るとは限らない**が、プロンプトや設計定数がその形になっている理由なので残してある。
 生成モデルを入れ替えたら測り直すこと。
 
@@ -836,7 +835,7 @@ BM25索引とベクトル行列は `chunks` から作る。
 - **`IngestReport.missing_images` は、Markdownの画像走査そのものが行われたときしか
   埋まらない。** `--with-vlm` を付けない取り込みでは `md_parser` は画像を一切走査
   しないため（本文冒頭「対象はPDF/PPTXの埋め込み画像だけでは…」節参照）、この
-  報告はいつも空になる。Streamlit経由の取り込みも、VLMに接続できないときは
+  報告はいつも空になる。Web画面経由の取り込みも、VLMに接続できないときは
   `caption_image=None` で走るため同じことが起きる。しかもGUI利用者がこれに
   遭遇しやすいのはまさにVLMが使えないとき（Ollama未起動・モデル未pull）であり、
   「画像参照が見つからなかった」という報告が出ないことを「見つかった」の意味に

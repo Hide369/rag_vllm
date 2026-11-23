@@ -38,8 +38,8 @@ Windows（10 / 11）を想定する。
 ファイアウォールで絞ることが唯一の境界であり、それを外すと社内資料が無制限に
 読める状態になる。信頼できない端末が同じセグメントにいる、あるいは資料に人事・
 契約などの機微情報が含まれるなら、この構成のままでは足りない。認証付きの
-リバースプロキシを前段に置くこと（[server-set.md](server-set.md) が Streamlit で
-同じ問題に対して採っている形が参考になる）。
+リバースプロキシを前段に置くこと（Nginx の Basic 認証など。GB10 への配置手順は
+[サーバー配置の案内](server-deployment.md) にあり、vLLM への切り替えのときに書く）。
 
 ## サーバ機の準備
 
@@ -54,8 +54,8 @@ New-Item -ItemType Directory -Path "C:\App\local-llm-rag" -Force
 cd C:\App\local-llm-rag
 git clone https://github.com/Hide369/local-llm-rag.git .
 
-python -m venv myvenv313
-.\myvenv313\Scripts\pip.exe install -r requirements.txt
+python -m venv rag_env
+.\rag_env\Scripts\pip.exe install -r requirements.txt
 ```
 
 ### 2. Ollama と埋め込みモデル
@@ -71,7 +71,7 @@ ollama pull bge-m3
 
 ```powershell
 # 資料を C:\App\local-llm-rag\source\ に配置してから
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source
+.\rag_env\Scripts\python.exe -m scripts.ingest_source
 ```
 
 `source/` は Git 管理外である。取り込みはこのサーバ機でだけ行う。
@@ -81,7 +81,7 @@ ollama pull bge-m3
 先にファイアウォールを開けず、自機だけで確かめる。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.rag_mcp_server --http --host 127.0.0.1 --port 8080
+.\rag_env\Scripts\python.exe -m scripts.rag_mcp_server --http --host 127.0.0.1 --port 8080
 ```
 
 別の PowerShell から叩く。
@@ -114,11 +114,10 @@ New-NetFirewallRule -DisplayName "local-docs MCP" -Direction Inbound `
 ### 6. 常駐させる
 
 通常の Windows には Linux の systemd に相当する仕組みが無いので、
-[NSSM](https://nssm.cc/) でサービス登録する。`server-set.md` の Streamlit と同じ
-方式である。
+[NSSM](https://nssm.cc/) でサービス登録する。
 
 ```powershell
-nssm install local-docs-mcp "C:\App\local-llm-rag\myvenv313\Scripts\python.exe" "-m scripts.rag_mcp_server --http --host 0.0.0.0 --port 8080"
+nssm install local-docs-mcp "C:\App\local-llm-rag\rag_env\Scripts\python.exe" "-m scripts.rag_mcp_server --http --host 0.0.0.0 --port 8080"
 nssm set local-docs-mcp AppDirectory "C:\App\local-llm-rag"
 nssm set local-docs-mcp AppEnvironmentExtra "OLLAMA_HOST=http://127.0.0.1:11434"
 nssm set local-docs-mcp Start SERVICE_AUTO_START

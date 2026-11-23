@@ -233,7 +233,7 @@ curl.exe http://<GB10のIP>:11434/api/version
 
 **要らないもの**を並べておく。
 
-- **Python と仮想環境**（`myvenv313`）、`requests` / `python-dotenv`
+- **Python と仮想環境**（`rag_env`）、`requests` / `python-dotenv`
 - **このリポジトリのクローン**（`models.json` を1つ落とすだけ）
 - **Ollama**（クライアント側では一切使わない）
 - **`.env`** — 接続先は `config.toml` の `base_url` に直接書く
@@ -489,21 +489,21 @@ exclude = ["OLLAMA_API_KEY"]
 **この手順の代わりであって、併用するものではない。**
 
 ```powershell
-py -3.13 -m venv myvenv313
-.\myvenv313\Scripts\python.exe -m pip install requests python-dotenv
+py -3.13 -m venv rag_env
+.\rag_env\Scripts\python.exe -m pip install requests python-dotenv
 ```
 
 要るのは、このリポジトリ一式（`scripts/coding_agent.py`・`coding_agent/`・
 `infra/codex-colab/` の雛形）、上の2パッケージ、対象プロジェクト直下の `.env`
 （`OLLAMA_HOST=http://<GB10のIP>:11434`）、そしてCodexのプラグイン画面から入れた
-Superpowers 6.3.0 である。`requirements.txt` の全部（pymupdf・streamlit・
+Superpowers 6.3.0 である。`requirements.txt` の全部（pymupdf・fastapi・
 onnxruntime など）はRAGアプリ用で、起動補助は触らない。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --check --model gpt-oss:120b
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --configure-context --context-size 131072
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --probe
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --check --model gpt-oss:120b
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --configure-context --context-size 131072
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --probe
+.\rag_env\Scripts\python.exe -m scripts.coding_agent
 ```
 
 手で置く場合との違いは3つある。

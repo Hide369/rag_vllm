@@ -22,16 +22,16 @@ Google ColabのL4上で動くOllamaを推論に使い、ファイル編集とコ
 
 ```powershell
 # URL・認証・モデル機能を確認する。推論は行わない
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --check
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --check
 
 # 元モデルをバックアップして、64kコンテキストを設定する
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --configure-context
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --configure-context
 
 # 64kの実配置とResponses APIのツール往復を実測する
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --probe
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --probe
 
 # 専用Codex設定とSuperpowersスキルを準備する
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --setup
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --setup
 ```
 
 別のプロジェクトを開く場合も、このリポジトリの仮想環境と起動補助を使える。対象プロジェクト直下にColabの接続値を書いた`.env`を置き、`--project`へそのフォルダを渡す。対象ごとにCodexの設定とSuperpowersのスキル参照は分離される。
@@ -41,7 +41,7 @@ $agentRoot = 'C:\path\to\local_llm'
 $targetProject = 'C:\path\to\another-project'
 Push-Location $agentRoot
 try {
-    .\myvenv313\Scripts\python.exe -m scripts.coding_agent --project $targetProject
+    .\rag_env\Scripts\python.exe -m scripts.coding_agent --project $targetProject
 } finally {
     Pop-Location
 }
@@ -68,9 +68,9 @@ Ollama側に焼き、`--probe` で全層がGPUに載っていることを確認�
 名指しする（131072で溢れたなら65536、65536で溢れたなら32768）。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --configure-context --context-size 32768
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --probe --context-size 32768
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --setup --context-size 32768
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --configure-context --context-size 32768
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --probe --context-size 32768
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --setup --context-size 32768
 ```
 
 一番小さい32768でも溢れた場合、下げる先はもう無い。モデルを小さくするか、同じGPUを
@@ -87,7 +87,7 @@ Playwright MCPの設定、接続確認、トラブルシューティングは[Pl
 Colab用の専用VS Codeを開く。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent
+.\rag_env\Scripts\python.exe -m scripts.coding_agent
 ```
 
 表示されたウィンドウのCodexサイドバーで依頼する。最初は次のような小さい依頼で、読取・編集・テストまで確認する。
@@ -117,7 +117,7 @@ Colabランタイムやngrokトンネルを作り直すとURLとAPIキーが変�
 `--configure-context`の初回実行は、変更前のモデルを `gpt-oss:20b-before-coding-agent` として保存する。元のモデル設定へ戻す場合は、Colab接続中に次を実行する。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.coding_agent --restore-context
+.\rag_env\Scripts\python.exe -m scripts.coding_agent --restore-context
 ```
 
 接続情報は通常どおり `.env` から読む。バックアップタグは自動削除しない。

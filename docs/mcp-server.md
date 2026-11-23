@@ -55,7 +55,7 @@ ollama pull bge-m3
 
 ```toml
 [mcp_servers.local_docs]
-command = "C:\\...\\local_llm\\myvenv313\\Scripts\\python.exe"
+command = "C:\\...\\local_llm\\rag_env\\Scripts\\python.exe"
 args = ["-m", "scripts.rag_mcp_server"]
 cwd = "C:\\...\\local_llm"
 
