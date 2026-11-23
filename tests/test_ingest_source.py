@@ -859,3 +859,19 @@ def test_ingest_directory_does_not_keep_code_blocks_by_default(tmp_path, monkeyp
     ingest_source.ingest_directory(tmp_path, collection, session=_FakeSession())
 
     assert seen == [False]
+
+
+def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(tmp_path, monkeypatch, capsys):
+    """古い OLLAMA_* が残っていれば、取り込みを始める前に止まる。"""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        sys, "argv", ["ingest_source.py", "--source-dir", str(source_dir)]
+    )
+
+    assert ingest_source.main() == 2
+
+    err = capsys.readouterr().err
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err

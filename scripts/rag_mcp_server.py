@@ -10,6 +10,7 @@
 「サーバの生存期間に最大1回」まで減らせるが、ゼロにはならない（設計書5節）。
 """
 import argparse
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -19,6 +20,7 @@ from ingest import reranker, store
 from ingest.embedder import EmbeddingError
 from ingest.prompting import format_hit_caption
 from ingest.retrieval import SEARCH_RESULT_COUNT, build_index, search
+from ingest.vllm_config import load_vllm_settings, reject_legacy_env
 
 # 根拠が無いときの出口。0件でも「ヒットしたが無関係」でも、エージェントが取る
 # べき道は同じなので、文面を1か所に持って両方から使う。
@@ -281,6 +283,15 @@ def main(argv=None) -> None:
         "--port", type=int, default=8080, help="--http のときの待ち受けポート"
     )
     args = parser.parse_args(argv)
+
+    # stdout は stdio の MCP プロトコルが使うため、メッセージは stderr へ出す。
+    # .env はここでは読まない（Codex / Claude Code が渡した環境変数だけを見る）。
+    try:
+        reject_legacy_env()
+        load_vllm_settings()
+    except ValueError as error:
+        print(f"エラー: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
 
     if not args.http:
         mcp.run()

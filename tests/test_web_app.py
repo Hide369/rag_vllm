@@ -22,7 +22,7 @@ from ingest.embedder import EMBED_DIM, EmbeddingError
 from ingest.models import Chunk
 from ingest.parsers import SUPPORTED_SUFFIXES
 from ingest.prompting import format_report
-from rag_web.app import CHAT_MODEL, CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, STATIC_DIR, create_app
+from rag_web.app import CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, STATIC_DIR, create_app
 from rag_web.auth import LoginThrottle, hash_password
 from rag_web.cowork import NO_TEMPLATE_LABEL, is_source_suffix, output_suffixes
 from rag_web.jobs import JobStore
@@ -198,6 +198,10 @@ def fake(tmp_path, jobs):
     fake.close_stores()
 
 
+# create_app へ明示的に渡す生成モデル名。環境変数 VLLM_CHAT_MODEL に依存させない。
+CHAT_MODEL = "test-chat-model"
+
+
 def _client(fake, jobs, max_upload_bytes=1024, throttle=None, **settings_overrides):
     settings = WebSettings(
         admin_password_hash=PASSWORD_HASH, max_upload_bytes=max_upload_bytes,
@@ -209,6 +213,7 @@ def _client(fake, jobs, max_upload_bytes=1024, throttle=None, **settings_overrid
         jobs=jobs,
         throttle=throttle,
         today=lambda: date(2026, 11, 22),
+        chat_model=CHAT_MODEL,
     )
     return TestClient(app)
 

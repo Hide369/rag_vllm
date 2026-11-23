@@ -569,3 +569,19 @@ def test_two_searches_never_run_at_the_same_time(monkeypatch):
         one.join()
 
     assert max(peak) == 1, f"検索が同時に走っている（最大 {max(peak)} 本）"
+
+
+def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(monkeypatch, capsys):
+    """古い OLLAMA_* が残っていれば、サーバを起こさずに止まる。"""
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    started = []
+    monkeypatch.setattr(rag_mcp_server.mcp, "run", lambda *a, **k: started.append(a))
+
+    with pytest.raises(SystemExit) as stopped:
+        rag_mcp_server.main([])
+
+    assert stopped.value.code == 2
+    assert started == []
+    err = capsys.readouterr().err
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err

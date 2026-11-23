@@ -29,6 +29,7 @@ DBに固定されており、技術ドキュメント側を測る手段が無か
 するために置いている。
 """
 import argparse
+import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ingest import chat, embedder, lexical, query_translation, reranker, store
+from ingest.vllm_config import load_vllm_settings, reject_legacy_env
 from ingest.retrieval import (
     DOCS_RERANK_FLOOR,
     RELEVANCE_THRESHOLD,
@@ -740,6 +742,14 @@ def main() -> int:
         help="RRF順とリランカー順を並べて出す（初回はモデル570MBの取得が走る）",
     )
     args = parser.parse_args()
+
+    # 古い設定が残ったまま測ると、宛先が違っていても距離は黙って測れてしまう。
+    try:
+        reject_legacy_env()
+        load_vllm_settings()
+    except ValueError as error:
+        print(f"エラー: {error}", file=sys.stderr)
+        return 2
 
     corpus = CORPUSES[args.corpus]
     db_path = Path(args.db) if args.db else corpus.db_path

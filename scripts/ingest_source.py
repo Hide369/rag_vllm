@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ingest import embedder, navigation, store, vlm
+from ingest.vllm_config import load_vllm_settings, reject_legacy_env
 from ingest.chunker import chunk_units
 from ingest.models import PAGE, SLIDE, ParsedUnit
 from ingest.parsers import SUPPORTED_SUFFIXES, parse
@@ -346,6 +347,14 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    # 取り込みは長いので、古い設定が残っていないかを処理の前に確かめる。
+    try:
+        reject_legacy_env()
+        load_vllm_settings()
+    except ValueError as error:
+        print(f"エラー: {error}", file=sys.stderr)
+        return 2
 
     if not args.source_dir.is_dir():
         print(f"ディレクトリがありません: {args.source_dir}")

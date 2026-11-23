@@ -180,3 +180,17 @@ def test_the_internal_corpus_never_counts_as_a_broken_translation():
     assert check_retrieval.translation_worked(
         check_retrieval.INTERNAL, lambda question: question
     )
+
+
+def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(monkeypatch, tmp_path, capsys):
+    """古い OLLAMA_* が残ったまま測ると、宛先の違う数字が黙って出てしまう。"""
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        sys, "argv", ["check_retrieval", "--db", str(tmp_path / "empty.sqlite3")]
+    )
+
+    assert check_retrieval.main() == 2
+
+    err = capsys.readouterr().err
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err

@@ -87,3 +87,39 @@ def test_importing_main_does_not_import_ingest():
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_main_refuses_to_start_with_a_legacy_ollama_setting(monkeypatch, capsys):
+    monkeypatch.setenv("RAG_WEB_ADMIN_PASSWORD_HASH", hash_password("correct horse battery", n=2 ** 4))
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    calls = []
+    monkeypatch.setattr(web_main.uvicorn, "run", lambda app, **kw: calls.append(kw))
+
+    assert web_main.main() == 2
+
+    err = capsys.readouterr().err
+    assert err.startswith("エラー: ")
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err
+    assert calls == []
+
+
+def test_main_gives_the_chat_model_from_the_environment_to_the_app(monkeypatch):
+    monkeypatch.setenv("RAG_WEB_ADMIN_PASSWORD_HASH", hash_password("correct horse battery", n=2 ** 4))
+    monkeypatch.setenv("VLLM_CHAT_MODEL", "custom-chat")
+    seen = {}
+    monkeypatch.setattr(
+        web_main.uvicorn, "run", lambda app, **kw: seen.update(app=app)
+    )
+    import rag_web.app as web_app
+
+    real_create_app = web_app.create_app
+
+    def spy(settings, **kwargs):
+        seen["chat_model"] = kwargs.get("chat_model")
+        return real_create_app(settings, **kwargs)
+
+    monkeypatch.setattr(web_app, "create_app", spy)
+
+    assert web_main.main() == 0
+    assert seen["chat_model"] == "custom-chat"

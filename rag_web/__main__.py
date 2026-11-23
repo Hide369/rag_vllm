@@ -12,23 +12,29 @@ from dotenv import load_dotenv
 
 
 def main() -> int:
-    # OLLAMA_HOST を ingest.embedder がインポート時に読むため、ingest を取り込む
-    # rag_web.app などより先に .env を読み込む必要がある（ingest 側の設定は import 時に決まる）。
+    # ingest 側の設定には import 時に環境変数を読むものが残っている（Ollama 版の名残）ため、
+    # ingest を取り込む rag_web.app などより先に .env を読み込む必要がある。
     # そのため .settings / .auth / .app はここで遅延インポートする。
     load_dotenv()
+
+    from ingest.vllm_config import load_vllm_settings, reject_legacy_env
 
     from .app import create_app
     from .auth import validate_password_hash
     from .settings import load_web_settings
 
     try:
+        # 古い OLLAMA_* が残ったまま起動すると、利用者は設定が効いていると思い込む。
+        # 画面を立ち上げる前に、移行が要ることを日本語で伝えて止める。
+        reject_legacy_env()
+        vllm_settings = load_vllm_settings()
         settings = load_web_settings()
         validate_password_hash(settings.admin_password_hash)
     except ValueError as e:
         print(f"エラー: {e}", file=sys.stderr)
         return 2
 
-    app = create_app(settings)
+    app = create_app(settings, chat_model=vllm_settings.chat_model)
     # Nginx の背後では接続元が常にプロキシになり、ログインの試行回数制限が全利用者で
     # 共有されてしまう。信頼するアドレスからの X-Forwarded-For だけを接続元にする。
     # 空なら、偽のヘッダーで制限を逃れられないよう一切信頼しない。
