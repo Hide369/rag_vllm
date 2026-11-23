@@ -267,6 +267,23 @@ def test_empty_docs_corpus_is_skipped_with_info(recorder, services, corpora):
     assert result["download"] is not None
 
 
+def test_empty_docs_search_adds_no_note(recorder, services, corpora):
+    """技術ドキュメントを引いて0件でも、補足には何も出さない。
+
+    以前は0件になった理由を切り分ける3行（使ったクエリ・床を外したときの件数・最も
+    近かった出典）を出していたが、原因が分かって役目を終えた。何を根拠にしたかは成果物
+    末尾の「参照したファイル」から読める。
+    """
+    _write_one(corpora.collection("docs"))
+    recorder.hits = []
+    result = _run(_request(use_internal=False, use_docs=True), services, corpora)
+    assert result["errors"] == []
+    assert result["infos"] == []
+    assert result["warnings"] == []
+    assert result["download"] is not None
+    assert [source["hits"] for source in result["sources"]] == [[]]
+
+
 def test_broken_template_reports_error(recorder, services, corpora, monkeypatch):
     name = _template(recorder, name="x.md")
 

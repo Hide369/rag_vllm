@@ -364,6 +364,18 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     assert client.get("/api/status", params={"corpus": "other"}).status_code == 422
 
 
+def test_status_of_an_empty_docs_corpus_carries_the_ingest_command(client):
+    """技術ドキュメントが0件のとき、画面が警告に出す取り込みコマンドを status が返す。
+
+    open_store はパスを間違えても例外を出さず空の DB を新規作成する。件数0のまま
+    黙って検索させず、取り込みに使う2つのコマンドを画面が示せるようにする。
+    """
+    docs = client.get("/api/status", params={"corpus": "docs"}).json()
+    assert docs["chunk_count"] == 0
+    assert "scripts.fetch_docs" in docs["docs_ingest_command"]
+    assert "scripts.ingest_source" in docs["docs_ingest_command"]
+
+
 def test_docs_ingest_command_matches_streamlit_app():
     source = Path(__file__).resolve().parent.parent / "rag_chat_app.py"
     flattened = "".join(
@@ -627,6 +639,33 @@ def test_upload_runs_as_shared_job_and_lists_item(client, fake, jobs):
     assert client.get("/api/uploads").json()["items"] == [
         {"key": "uploads/a.txt", "name": "a.txt"},
         {"key": "uploads/b.md", "name": "b.md"},
+    ]
+
+
+def test_uploaded_document_really_reaches_the_store(client, fake, jobs, monkeypatch):
+    """実際の取り込み処理（解析・チャンク・格納）を通し、DB に入って一覧に出るまでを見る。
+
+    他のアップロードのテストは ingest_uploads を偽物に差し替えており、配線しか見ていない。
+    解析から格納まで本物を通すのはここだけである。埋め込みの HTTP 呼び出しだけは固定の
+    ベクトルに差し替える（Ollama に依存させない）。
+    """
+    from ingest import embedder
+    from scripts import ingest_source
+
+    monkeypatch.setattr(
+        embedder, "embed_texts", lambda texts, session=None: [[0.1] * EMBED_DIM for _ in texts]
+    )
+    fake.ingest_uploads = ingest_source.ingest_uploads
+    markdown = "# 議題\n\n取り込みUIの設計を決めた。\n"
+    body = _upload_body(("持ち込み.md", markdown.encode("utf-8")))
+    response = client.post("/api/uploads", json=body, headers=CSRF)
+    assert response.status_code == 200, response.text
+    result = _job_result(client, jobs, response.json()["job_id"])
+    assert result["state"] == "done", result
+    collection = fake.open_store(fake.db_paths["internal"])
+    assert store.indexed_sources(collection) == {"uploads/持ち込み.md"}
+    assert client.get("/api/uploads").json()["items"] == [
+        {"key": "uploads/持ち込み.md", "name": "持ち込み.md"}
     ]
 
 

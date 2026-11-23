@@ -303,3 +303,89 @@ def test_docs_corpus_translates_query_with_previous_question(monkeypatch):
     assert "FastAPIの依存性注入とは" in prompt
     assert "例は？" in prompt
     assert recorder.search_calls[0][1] == "dependency injection example"
+
+
+def test_search_still_runs_without_reranking_when_the_reranker_is_unavailable(no_conditions):
+    """リランカーが使えなくても、並べ替えずに検索して回答する。
+
+    並べ替えは検索結果の順序を良くするものであって、検索が成立する条件ではない。
+    rerank_callable() が None を返す（確認に失敗した）環境で検索ごと落ちる実装を防ぐ。
+    """
+    corpora = FakeCorpora()
+    corpora.rerank = None
+    recorder = Recorder()
+    events = _run(recorder, _request(), corpora)
+    assert events[-1]["type"] == "done"
+    assert recorder.search_calls[0][2]["rerank"] is None
+
+
+def test_mermaid_request_reports_display_and_keeps_html(no_conditions):
+    """「マーメイドで表示して」は、描画せず記法のまま出す指定として画面へ伝わる。"""
+    recorder = Recorder(chunks=["graph TD;\n  A-->B<br>C;"])
+    events = _run(recorder, _request(question="流れをマーメイドで表示して"))
+    assert "<br>" in "".join(e["text"] for e in events if e["type"] == "delta")
+    assert events[-1] == {"type": "done", "display": "mermaid"}
+
+
+def test_display_mode_is_decided_per_question(no_conditions):
+    """表示指定は質問1つごとに閉じる。前の質問の指定を持ち越さない。"""
+    recorder = Recorder()
+    first = _run(recorder, _request(question="一覧をマークダウンで表示して"))
+    second = _run(recorder, _request(question="運転音は"))
+    assert first[-1]["display"] == "markdown"
+    assert second[-1]["display"] is None
+
+
+def test_display_mode_is_not_set_when_the_search_fails(monkeypatch):
+    """検索の失敗は記法ではない。書式を頼まれていても error だけを返し、display は付かない。"""
+    monkeypatch.setattr(
+        answering.conditions, "extract", lambda q, s, ask: conditions.Extraction()
+    )
+
+    def search(*args, **kwargs):
+        raise EmbeddingError("接続できません")
+
+    recorder = Recorder()
+    services = Services(
+        stream_chat=recorder.stream_chat, ask_json=recorder.ask_json, search=search
+    )
+    events = list(
+        answer_events(
+            _request(question="一覧をマークダウンで表示して"), services, FakeCorpora(), TODAY
+        )
+    )
+    assert [e["type"] for e in events] == ["error"]
+    assert "display" not in events[0]
+
+
+def test_internal_corpus_uses_internal_prompt_and_never_translates():
+    """社内資料は社内資料向けのプロンプトで答え、翻訳のための LLM 呼び出しをしない。
+
+    属性の無い（スキーマが空の）コーパスでは条件抽出も LLM を呼ばない。ask_json の
+    呼び出しが0回であることが、翻訳が社内資料の経路に配線されていない直接の証拠になる。
+    """
+    recorder = Recorder()
+    events = _run(recorder, _request(), FakeCorpora(schema={}))
+    assert events[-1]["type"] == "done"
+    assert recorder.ask_calls == []
+    user_content = recorder.chat_calls[0][1][-1]["content"]
+    assert "本文です" in user_content
+    assert "社内文書" in user_content
+
+
+def test_docs_corpus_uses_docs_prompt_and_asks_with_the_original_question():
+    """技術ドキュメントは専用のプロンプトで答える。生成に渡す質問は翻訳前の日本語のまま。
+
+    検索クエリだけを英語へ翻訳する。生成側まで翻訳後の質問にすると、利用者の問いと
+    回答がずれる。社内資料向けの歯止め（「社内文書」）が混ざらないことも確かめる。
+    """
+    recorder = Recorder(ask_reply='{"query": "modal dialog st.dialog"}')
+    question = "Streamlitでモーダルダイアログを出す書き方"
+    events = _run(recorder, _request(corpus="docs", question=question))
+    assert events[-1]["type"] == "done"
+    assert recorder.search_calls[0][1] == "modal dialog st.dialog"
+    user_content = recorder.chat_calls[0][1][-1]["content"]
+    assert question in user_content
+    assert "modal dialog st.dialog" not in user_content
+    assert "混ぜないでください" in user_content
+    assert "社内文書" not in user_content
