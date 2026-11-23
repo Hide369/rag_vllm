@@ -844,6 +844,22 @@ def test_cowork_panel_starts_with_a_guide_to_what_it_can_do_and_how_to_use_it():
     assert 'show("cowork-help-no-template", options.no_template_label)' in script
 
 
+def test_cowork_guide_is_folded_by_default_and_explains_template_marks():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    start = html.index('id="cowork-help"')
+    tag = html[html.rindex("<details", 0, start):html.index(">", start)]
+    # 毎回の操作の邪魔にならないよう、開くのは読みたい人だけにする
+    assert " open" not in tag
+    guide = html[start:html.index("</details>", start)]
+    # 埋め込み文字列の書き方（docgen/marks.py の記法）
+    for phrase in ("{{会議名}}", "{{名前}}", "のまま残", "図"):
+        assert phrase in guide, phrase
+    # 雛形に使える形式はサーバーが持つ。案内には /api/cowork/options の値を入れる
+    assert 'id="cowork-help-template-suffixes"' in guide
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'show("cowork-help-template-suffixes", options.template_suffixes.join("・"))' in script
+
+
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
     # 見出し・ラベルの文言を固定する。
