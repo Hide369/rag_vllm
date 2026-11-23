@@ -26,3 +26,28 @@ def test_invalid_values_name_the_variable(name, value):
 def test_port_accepts_upper_bound():
     s = load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h", "RAG_WEB_PORT": "65535"})
     assert s.port == 65535
+
+
+def test_proxy_and_concurrency_defaults():
+    s = load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h"})
+    assert (s.forwarded_allow_ips, s.threadpool_size, s.max_cowork_jobs) == ("127.0.0.1", 40, 2)
+
+
+def test_empty_forwarded_allow_ips_is_kept_empty():
+    # 空は「プロキシのヘッダーを信頼しない」という意思表示。既定値へ戻してはいけない。
+    s = load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h", "RAG_WEB_FORWARDED_ALLOW_IPS": ""})
+    assert s.forwarded_allow_ips == ""
+
+
+def test_forwarded_allow_ips_is_stripped():
+    s = load_web_settings(
+        {"RAG_WEB_ADMIN_PASSWORD_HASH": "h", "RAG_WEB_FORWARDED_ALLOW_IPS": "  10.0.0.1,10.0.0.2 "})
+    assert s.forwarded_allow_ips == "10.0.0.1,10.0.0.2"
+
+
+@pytest.mark.parametrize("name,value", [
+    ("RAG_WEB_THREADPOOL_SIZE", "0"), ("RAG_WEB_THREADPOOL_SIZE", "x"),
+    ("RAG_WEB_MAX_COWORK_JOBS", "abc"), ("RAG_WEB_MAX_COWORK_JOBS", "0")])
+def test_concurrency_values_name_the_variable(name, value):
+    with pytest.raises(ValueError, match=name):
+        load_web_settings({"RAG_WEB_ADMIN_PASSWORD_HASH": "h", name: value})

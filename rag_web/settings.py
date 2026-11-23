@@ -23,6 +23,13 @@ class WebSettings:
     max_upload_bytes: int = 50 * 1024 * 1024
     session_ttl_s: int = 12 * 3600
     cookie_secure: bool = False
+    # リバースプロキシ（Nginx）のアドレス。ここからの X-Forwarded-For だけを信じて、
+    # ログインの試行回数制限を利用者ごとに数える。空文字は「ヘッダーを信頼しない」。
+    forwarded_allow_ips: str = "127.0.0.1"
+    # anyio のスレッドプール（同期ルートを走らせる）の大きさ。
+    threadpool_size: int = 40
+    # 同時に走らせる Cowork（文書生成）の数。1本ごとに添付と生成物がメモリに載る。
+    max_cowork_jobs: int = 2
 
 
 def _positive_int(environ: Mapping[str, str], name: str, default: int) -> int:
@@ -75,4 +82,12 @@ def load_web_settings(environ: Mapping[str, str] = os.environ) -> WebSettings:
             environ, "RAG_WEB_SESSION_TTL_HOURS", WebSettings.session_ttl_s // 3600
         ) * 3600,
         cookie_secure=_bool(environ, "RAG_WEB_COOKIE_SECURE", WebSettings.cookie_secure),
+        # 空文字は有効な値（信頼しない）なので、未設定のときだけ既定値にする。
+        forwarded_allow_ips=environ.get(
+            "RAG_WEB_FORWARDED_ALLOW_IPS", WebSettings.forwarded_allow_ips
+        ).strip(),
+        threadpool_size=_positive_int(
+            environ, "RAG_WEB_THREADPOOL_SIZE", WebSettings.threadpool_size),
+        max_cowork_jobs=_positive_int(
+            environ, "RAG_WEB_MAX_COWORK_JOBS", WebSettings.max_cowork_jobs),
     )
