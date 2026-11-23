@@ -1,0 +1,31 @@
+# /etc/systemd/system/rag-web.service に置く。実測はしていない（GB10 の実機で起動したことがない）。
+# 配置は /opt/rag、実行ユーザーは専用の rag（docs/server-deployment.md の手順 2）。
+[Unit]
+Description=RAG web UI (rag_web)
+# vLLM は docker compose 側で restart: unless-stopped にしてあり、systemd からは順序だけ指定する。
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rag
+Group=rag
+WorkingDirectory=/opt/rag
+# VLLM_*_URL、VLLM_API_KEY、RAG_WEB_* を書いた .env（権限 600、所有者 rag）。
+# リポジトリの外に置く。python-dotenv も WorkingDirectory の .env を読むが、
+# systemd 側で渡すほうが値の出どころが1つで済む。
+EnvironmentFile=/etc/rag/rag.env
+ExecStart=/opt/rag/rag_env/bin/python -m rag_web
+Restart=on-failure
+RestartSec=5
+
+# 最小権限
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# DB（SQLite）・source/・templates/・取り込み中の一時ファイルを置く場所だけ書き込める。
+ReadWritePaths=/opt/rag
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+# /etc/systemd/system/rag-mcp.service に置く。実測はしていない（GB10 の実機で起動したことがない）。
+# 社内資料の検索（MCP の search_documents）を streamable-http で常駐させる。
+# 127.0.0.1 にだけ bind し、外からは Nginx の /mcp（トークン認証）だけが届く。
+[Unit]
+Description=RAG MCP server (local_docs, streamable-http)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rag
+Group=rag
+WorkingDirectory=/opt/rag
+# VLLM_EMBED_URL などを書いた .env。この MCP サーバーが呼ぶのは埋め込みの vLLM だけだが、
+# 設定は rag_web と同じファイルを使い回してよい（値の出どころを1つにする）。
+EnvironmentFile=/etc/rag/rag.env
+ExecStart=/opt/rag/rag_env/bin/python -m scripts.rag_mcp_server --http --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 検索は読むだけだが、開くときに SQLite がジャーナルを作る場合がある。
+ReadWritePaths=/opt/rag
+
+[Install]
+WantedBy=multi-user.target
