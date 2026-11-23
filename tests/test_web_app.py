@@ -827,6 +827,23 @@ def test_index_has_no_model_picker():
     assert "モデル名" not in html
 
 
+def test_cowork_panel_starts_with_a_guide_to_what_it_can_do_and_how_to_use_it():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    panel = html[html.index('id="cowork-panel"'):]
+    # 案内は Cowork の欄の先頭に置き、Cowork を開いたときだけ見える
+    assert panel.index('id="cowork-help"') < panel.index('id="cowork-template"')
+    guide = panel[panel.index('id="cowork-help"'):panel.index('id="cowork-template"')]
+    for phrase in (
+        "Cowork でできること", "使い方", "フォーマットファイル", "出力形式", "添付", "送信", "ダウンロード",
+    ):
+        assert phrase in guide, phrase
+    # 雛形なしの選択肢の名前はサーバーが持つ。案内には写さず、/api/cowork/options の値を入れる
+    assert 'id="cowork-help-no-template"' in guide
+    assert NO_TEMPLATE_LABEL not in html
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'show("cowork-help-no-template", options.no_template_label)' in script
+
+
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
     # 見出し・ラベルの文言を固定する。

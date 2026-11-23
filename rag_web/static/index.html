@@ -122,6 +122,11 @@
 
   /* Cowork */
   #cowork-panel { border-top: 1px solid var(--border); padding-top: 12px; }
+  .cowork-help { border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px;
+                 background: color-mix(in srgb, var(--accent) 5%, var(--panel)); }
+  .cowork-help summary { cursor: pointer; font-weight: 600; }
+  .cowork-help p { margin: 8px 0 4px; }
+  .cowork-help ul, .cowork-help ol { margin: 4px 0; padding-left: 1.4em; }
   .cowork-template-row { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 8px; align-items: end; }
   @media (max-width: 600px) { .cowork-template-row { grid-template-columns: minmax(0, 1fr); } }
   #cowork-pasted { width: 100%; resize: vertical; }
@@ -218,6 +223,24 @@
     </div>
     <!-- Cowork（文書生成）。依頼文は下のチャットの入力欄から送る。選択肢は /api/cowork/options から埋める -->
     <div id="cowork-panel" class="hidden">
+      <!-- 初めての人向けの案内。読み終えたら畳めるよう details にする -->
+      <details id="cowork-help" class="cowork-help field" open>
+        <summary>Cowork でできること・使い方</summary>
+        <!-- 日本語の文の途中で改行すると、ブラウザが空白を挟む。文は1行に書く -->
+        <p><strong>Cowork でできること</strong>：社内資料や技術ドキュメントを検索し、その内容を根拠に文書やソースコードのファイルを作って、ダウンロードできます。</p>
+        <ul>
+          <li>登録したフォーマットファイル（Word・Excel などの雛形）の空欄を埋めて、同じ形式のファイルを作る</li>
+          <li>フォーマットファイルを使わずに、報告書・手順書・一覧表・スライド・ソースコードなどを、選んだ出力形式で作る</li>
+          <li>手元の資料を添付したり、テキストを貼り付けたりして、それを材料に作る（この回だけ使い、DBには入れません）</li>
+        </ul>
+        <p><strong>使い方</strong></p>
+        <ol>
+          <li>フォーマットファイルを選びます。雛形を使わないときは「<span id="cowork-help-no-template"></span>」を選び、出力形式を選びます。雛形は「フォーマットファイルを登録・削除」から登録できます。</li>
+          <li>参照する資料（社内資料・技術ドキュメント）にチェックを入れます。必要なら資料を添付するか、テキストを貼り付けます。</li>
+          <li>下の入力欄に、作りたいものと盛り込む内容を書いて「送信」を押します。できあがると「ダウンロード」ボタンが出ます。</li>
+        </ol>
+        <p class="muted small">依頼はチャットの会話履歴には残りません。生成には時間がかかることがあります。</p>
+      </details>
       <div class="cowork-template-row field">
         <div>
           <label class="label" for="cowork-template">フォーマットファイル</label>

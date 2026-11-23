@@ -776,6 +776,8 @@ async function loadCoworkOptions() {
   setOptions($("cowork-template"), ["", ...options.templates.map((item) => item.name)],
     (value) => value || options.no_template_label);
   setOptions($("cowork-output-suffix"), options.output_suffixes);
+  // 案内の文に、選択肢と同じ名前を出す
+  show("cowork-help-no-template", options.no_template_label);
   $("cowork-files").accept = options.attachment_suffixes.join(",");
   $("template-files").accept = options.template_suffixes.join(",");
   syncOutputSuffix();
