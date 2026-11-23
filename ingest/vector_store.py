@@ -124,9 +124,9 @@ def open_store(path: str) -> "VectorStore":
 
 class VectorStore:
     def __init__(self, path: str):
-        # check_same_thread=False は Streamlit が @st.cache_resource で保持した
-        # 接続を別スレッドから触るため。UIの「差分を取り込む」はこの接続から
-        # 書くので、読むだけではない。
+        # check_same_thread=False は FastAPI のスレッドプールの複数のスレッドから
+        # 1つの接続を使うため。UIの「差分を取り込む」はこの接続から書くので、
+        # 読むだけではない。
         #
         # sqlite3 が直列化するのはAPI呼び出し1回ごとであってトランザクションでは
         # ない。2セッションが同時に取り込むと、片方のcommitがもう片方の途中の
@@ -151,8 +151,8 @@ class VectorStore:
         # 旧スキーマの拒否やスキーマ適用が例外を投げると、送出された例外の
         # トレースバックがフレーム経由で self を掴んだままになり、参照が切れる
         # まで接続が解放されない。CLIなら即終了で
-        # 実害はないが、Streamlit の @st.cache_resource は例外のたびに再試行する
-        # ので、開くたびにファイルハンドルが積み上がる。
+        # 実害はないが、常駐するWebサーバーはコーパスの DB を開けなかったとき次の
+        # リクエストで開き直すので、開くたびにファイルハンドルが積み上がる。
         try:
             self._connection.execute("PRAGMA foreign_keys = ON")
             self._reject_old_schema()
@@ -185,6 +185,14 @@ class VectorStore:
                 "旧スキーマのDBです。次を実行して変換してください:\n"
                 "    python -m scripts.migrate_store vector_store.sqlite3"
             )
+
+    def close(self) -> None:
+        """接続を閉じる。2回呼んでも例外にならない（sqlite3 の close が冪等）。
+
+        読み書きと同じ _lock の下で閉じ、実行中の操作の途中で接続を奪わない。
+        """
+        with self._lock:
+            self._connection.close()
 
     def count(self) -> int:
         """出現の数。入れた件数がそのまま返るという既存の意味を保つ。"""

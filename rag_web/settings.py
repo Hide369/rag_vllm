@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from typing import Mapping
@@ -23,6 +24,14 @@ class WebSettings:
     max_upload_bytes: int = 50 * 1024 * 1024
     session_ttl_s: int = 12 * 3600
     cookie_secure: bool = False
+    # リバースプロキシ（Nginx）のアドレス。ここからの X-Forwarded-For だけを信じて、
+    # ログインの試行回数制限を利用者ごとに数える。空文字は「ヘッダーを信頼しない」。
+    forwarded_allow_ips: str = "127.0.0.1"
+    # anyio のスレッドプール（同期ルートを走らせる）の大きさ。
+    threadpool_size: int = 40
+    # 同時に走らせる Cowork（文書生成）の数の上限。メモリの上限ではない
+    # （終わった結果もジョブの保持期限まで残る）。
+    max_cowork_jobs: int = 2
 
 
 def _positive_int(environ: Mapping[str, str], name: str, default: int) -> int:
@@ -44,6 +53,35 @@ def _port(environ: Mapping[str, str], name: str, default: int) -> int:
         raise ValueError(
             f"{name} は1〜{_MAX_PORT}の整数で指定してください（現在の値: {environ[name]!r}）")
     return value
+
+
+def _trusted_proxies(environ: Mapping[str, str], name: str, default: str) -> str:
+    """カンマ区切りの IP / CIDR を検証し、空白を除いた形で返す。空文字は「信頼しない」。
+
+    uvicorn は読めない項目を黙って文字列として扱い、誤字があっても何も信頼しない
+    だけで気づけない。"*" は全員を信頼してしまい、X-Forwarded-For を偽って
+    ログインの試行回数制限を逃れられるため、受け付けない。
+    """
+    raw = environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if value == "":
+        return ""
+    entries = [entry.strip() for entry in value.split(",")]
+    for entry in entries:
+        try:
+            # uvicorn と同じく、"/" を含む項目はネットワークとして厳密に読む。
+            if "/" in entry:
+                ipaddress.ip_network(entry)
+            else:
+                ipaddress.ip_address(entry)
+        except ValueError:
+            raise ValueError(
+                f"{name} は IP アドレスか CIDR のカンマ区切りで指定してください"
+                f"（\"*\" は使えません。現在の値: {raw!r}）"
+            ) from None
+    return ",".join(entries)
 
 
 def _bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
@@ -75,4 +113,11 @@ def load_web_settings(environ: Mapping[str, str] = os.environ) -> WebSettings:
             environ, "RAG_WEB_SESSION_TTL_HOURS", WebSettings.session_ttl_s // 3600
         ) * 3600,
         cookie_secure=_bool(environ, "RAG_WEB_COOKIE_SECURE", WebSettings.cookie_secure),
+        # 空文字は有効な値（信頼しない）なので、未設定のときだけ既定値にする。
+        forwarded_allow_ips=_trusted_proxies(
+            environ, "RAG_WEB_FORWARDED_ALLOW_IPS", WebSettings.forwarded_allow_ips),
+        threadpool_size=_positive_int(
+            environ, "RAG_WEB_THREADPOOL_SIZE", WebSettings.threadpool_size),
+        max_cowork_jobs=_positive_int(
+            environ, "RAG_WEB_MAX_COWORK_JOBS", WebSettings.max_cowork_jobs),
     )

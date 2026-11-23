@@ -12,7 +12,9 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import anyio.to_thread
 from fastapi.testclient import TestClient
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import docgen
 from ingest import store, vector_store
@@ -78,6 +80,9 @@ class Fake:
         # 設定すると ask_json はこれが set されるまで返らない（生成の途中で止める）。
         self.ask_release: threading.Event | None = None
         self.ask_started = threading.Event()
+        # 雛形なしの生成（ask_text）を止める。Cowork の同時実行数のテスト用。
+        self.text_release: threading.Event | None = None
+        self.text_started = threading.Event()
 
     def open_store(self, path):
         collection = vector_store.open_store(path)
@@ -85,10 +90,10 @@ class Fake:
         return collection
 
     def close_stores(self):
-        # VectorStore には close() が無い（技術的負債）。開いた接続を閉じないと
+        # 開いた接続を閉じないと
         # GC 時に sqlite3 の ResourceWarning が出て、-W error で落ちる。
         for collection in self.opened:
-            collection._connection.close()
+            collection.close()
 
     def stream_chat(self, model, messages, temperature):
         self.chat_calls.append((model, messages, temperature))
@@ -103,6 +108,9 @@ class Fake:
 
     def ask_text(self, model, prompt, num_ctx=None):
         self.ask_text_calls.append((model, prompt, num_ctx))
+        self.text_started.set()
+        if self.text_release is not None:
+            assert self.text_release.wait(WAIT_S), "テストが text_release を set しなかった"
         return "# 文書\n\n本文\n"
 
     def parse(self, path, caption_image=None):
@@ -190,8 +198,11 @@ def fake(tmp_path, jobs):
     fake.close_stores()
 
 
-def _client(fake, jobs, max_upload_bytes=1024, throttle=None):
-    settings = WebSettings(admin_password_hash=PASSWORD_HASH, max_upload_bytes=max_upload_bytes)
+def _client(fake, jobs, max_upload_bytes=1024, throttle=None, **settings_overrides):
+    settings = WebSettings(
+        admin_password_hash=PASSWORD_HASH, max_upload_bytes=max_upload_bytes,
+        **settings_overrides,
+    )
     app = create_app(
         settings,
         services=fake.services(),
@@ -364,14 +375,16 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     assert client.get("/api/status", params={"corpus": "other"}).status_code == 422
 
 
-def test_docs_ingest_command_matches_streamlit_app():
-    source = Path(__file__).resolve().parent.parent / "rag_chat_app.py"
-    flattened = "".join(
-        line.strip().strip('"')
-        for line in source.read_text(encoding="utf-8").splitlines()
-        if line.strip().startswith('"')
-    )
-    assert DOCS_INGEST_COMMAND in flattened
+def test_status_of_an_empty_docs_corpus_carries_the_ingest_command(client):
+    """技術ドキュメントが0件のとき、画面が警告に出す取り込みコマンドを status が返す。
+
+    open_store はパスを間違えても例外を出さず空の DB を新規作成する。件数0のまま
+    黙って検索させず、取り込みに使う2つのコマンドを画面が示せるようにする。
+    """
+    docs = client.get("/api/status", params={"corpus": "docs"}).json()
+    assert docs["chunk_count"] == 0
+    assert "scripts.fetch_docs" in docs["docs_ingest_command"]
+    assert "scripts.ingest_source" in docs["docs_ingest_command"]
 
 
 def test_chat_streams_ndjson_events(client, fake):
@@ -420,7 +433,7 @@ def test_chat_rejects_system_role_and_oversized_history(client, fake):
 
 
 def test_chat_accepts_long_question(client, fake):
-    # Streamlit 版には質問の長さの上限が無かった。資料を貼って尋ねる長さは通す。
+    # 資料を貼って尋ねる長さは通す。
     response = client.post("/api/chat", json=_chat_body(question="あ" * 4001), headers=CSRF)
     assert response.status_code == 200
     assert json.loads(response.text.splitlines()[-1])["type"] == "done"
@@ -532,6 +545,42 @@ def test_login_throttled_after_repeated_failures(fake, jobs):
         assert client.get("/api/me").json() == {"admin": False}
 
 
+def _behind_proxy(fake, jobs, trusted_hosts):
+    """__main__ が uvicorn に任せる設定と同じ trusted_hosts で、アプリを包む。"""
+    settings = WebSettings(admin_password_hash=PASSWORD_HASH)
+    app = create_app(
+        settings, services=fake.services(), jobs=jobs, throttle=LoginThrottle(),
+        today=lambda: date(2026, 11, 22),
+    )
+    return TestClient(ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts))
+
+
+def _login_as(client, forwarded_for, password):
+    return client.post(
+        "/api/login", json={"password": password},
+        headers={**CSRF, "X-Forwarded-For": forwarded_for},
+    )
+
+
+def test_login_throttle_uses_forwarded_client_from_trusted_proxy(fake, jobs):
+    # TestClient の接続元は "testclient"。これを信頼するプロキシとして扱う。
+    with _behind_proxy(fake, jobs, "testclient") as client:
+        for _ in range(5):
+            assert _login_as(client, "10.0.0.5", "wrong").status_code == 401
+        assert _login_as(client, "10.0.0.5", PASSWORD).status_code == 429
+        # 別の利用者は、同じプロキシ経由でも巻き添えにならない。
+        assert _login_as(client, "10.0.0.6", PASSWORD).status_code == 200
+
+
+def test_forwarded_header_from_untrusted_peer_does_not_change_client(fake, jobs):
+    # 信頼しない接続元が X-Forwarded-For を偽っても、接続元は書き換わらない。
+    # 書き換わるなら、送り先を変えるだけでログインの試行回数制限を逃れられる。
+    with _behind_proxy(fake, jobs, "127.0.0.1") as client:
+        for index in range(5):
+            assert _login_as(client, f"10.0.1.{index}", "wrong").status_code == 401
+        assert _login_as(client, "10.0.1.99", PASSWORD).status_code == 429
+
+
 def test_logout_revokes_session(client, fake):
     _login(client)
     token = client.cookies.get("rag_web_session")
@@ -630,6 +679,33 @@ def test_upload_runs_as_shared_job_and_lists_item(client, fake, jobs):
     ]
 
 
+def test_uploaded_document_really_reaches_the_store(client, fake, jobs, monkeypatch):
+    """実際の取り込み処理（解析・チャンク・格納）を通し、DB に入って一覧に出るまでを見る。
+
+    他のアップロードのテストは ingest_uploads を偽物に差し替えており、配線しか見ていない。
+    解析から格納まで本物を通すのはここだけである。埋め込みの HTTP 呼び出しだけは固定の
+    ベクトルに差し替える（Ollama に依存させない）。
+    """
+    from ingest import embedder
+    from scripts import ingest_source
+
+    monkeypatch.setattr(
+        embedder, "embed_texts", lambda texts, session=None: [[0.1] * EMBED_DIM for _ in texts]
+    )
+    fake.ingest_uploads = ingest_source.ingest_uploads
+    markdown = "# 議題\n\n取り込みUIの設計を決めた。\n"
+    body = _upload_body(("持ち込み.md", markdown.encode("utf-8")))
+    response = client.post("/api/uploads", json=body, headers=CSRF)
+    assert response.status_code == 200, response.text
+    result = _job_result(client, jobs, response.json()["job_id"])
+    assert result["state"] == "done", result
+    collection = fake.open_store(fake.db_paths["internal"])
+    assert store.indexed_sources(collection) == {"uploads/持ち込み.md"}
+    assert client.get("/api/uploads").json()["items"] == [
+        {"key": "uploads/持ち込み.md", "name": "持ち込み.md"}
+    ]
+
+
 def test_second_shared_operation_returns_409(client, fake, jobs):
     _login(client)
     fake.release = threading.Event()
@@ -710,7 +786,7 @@ def test_index_has_no_model_picker():
 
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
-    # 見出し・ラベルは Streamlit 版（rag_chat_app.py）と同じ文言にする。
+    # 見出し・ラベルの文言を固定する。
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     for element_id in (
         "mode-chat", "mode-cowork", "cowork-panel", "cowork-template", "open-templates",
@@ -1097,3 +1173,71 @@ def test_template_register_reports_partial_failure(client, fake):
     assert detail.startswith("b.md を登録できませんでした: ")
     assert detail.endswith("（登録済み: a.md）")
     assert [item["name"] for item in client.get("/api/templates").json()["items"]] == ["a.md"]
+
+
+COWORK_BUSY_MESSAGE = "ほかの人の生成が混み合っています。少し待ってからもう一度実行してください"
+
+
+def _start_blocked_cowork(client, fake):
+    """終わらない生成を1本走らせ、生成の中に入るまで待つ。"""
+    fake.text_release = threading.Event()
+    fake.text_started.clear()
+    response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+    assert response.status_code == 200, response.text
+    assert fake.text_started.wait(WAIT_S)
+    return response.json()["job_id"]
+
+
+def test_cowork_over_the_limit_is_rejected_with_503(fake, jobs):
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        first = _start_blocked_cowork(client, fake)
+        try:
+            response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+            assert response.status_code == 503
+            assert response.json() == {"detail": COWORK_BUSY_MESSAGE}
+        finally:
+            fake.text_release.set()
+        assert _job_result(client, jobs, first)["state"] == "done"
+
+
+def test_cowork_slot_is_returned_when_the_job_finishes(fake, jobs):
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        first = _start_blocked_cowork(client, fake)
+        fake.text_release.set()
+        assert _job_result(client, jobs, first)["state"] == "done"
+        assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
+
+
+def test_cowork_slot_is_returned_when_the_job_raises(fake, jobs, monkeypatch):
+    # generate_cowork は例外を捕まえてエラー結果として返すため、偽の ask_text で
+    # 失敗させても work の外へは出ない。work 自体から例外を出して finally を通す。
+    def explode(*args, **kwargs):
+        raise RuntimeError("生成に失敗")
+
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        monkeypatch.setattr("rag_web.app.generate_cowork", explode)
+        response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+        assert response.status_code == 200
+        outcome = _job_result(client, jobs, response.json()["job_id"])
+        assert outcome == {"state": "failed", "error": "生成に失敗"}
+        monkeypatch.undo()
+        assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
+
+
+def test_cowork_slot_is_returned_when_the_job_cannot_start(fake, jobs, monkeypatch):
+    def cannot_start(*args, **kwargs):
+        raise RuntimeError("スレッドを起動できない")
+
+    monkeypatch.setattr(jobs, "start", cannot_start)
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        with pytest.raises(RuntimeError, match="スレッドを起動できない"):
+            client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+        monkeypatch.undo()
+        assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
+
+
+def test_threadpool_size_is_applied_on_startup(fake, jobs):
+    with _client(fake, jobs, threadpool_size=7) as client:
+        # リミッターはイベントループごとにあるため、アプリが動くループの中で読む。
+        limiter = client.portal.call(anyio.to_thread.current_default_thread_limiter)
+        assert limiter.total_tokens == 7

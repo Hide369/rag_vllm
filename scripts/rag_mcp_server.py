@@ -147,7 +147,7 @@ _search_lock = threading.Lock()
 def _open():
     """DBを開く。
 
-    パスは store.DB_PATH（rag_chat_app.py・scripts/ingest_source.py と共通）を
+    パスは store.DB_PATH（rag_web/・scripts/ingest_source.py と共通）を
     使う。引数や環境変数で受け取らないのは、3か所で食い違うと open_store が
     例外を出さずに空のDBを新規作成し、検索が黙って全部空になる状態が
     生まれるためである（ingest/store.py のコメント参照）。
@@ -163,7 +163,7 @@ def _get_store(state: _State):
     executescript(_SCHEMA) と commit() を実行する。つまり開くたびにSQLiteの
     書き込みロックを取りにいくため、取り込みの書き込みと重なると busy_timeout
     ぶん待たされ、"database is locked" で終わる。開きっぱなしにするのは
-    rag_chat_app.py:30-32 の @st.cache_resource と同じ形である。
+    rag_web/corpora.py のコーパスごとのキャッシュと同じ形である。
 
     これで消えるのは「毎リクエスト」であって「必ず」ではない。最初の検索は
     今もそのスキーマ確認の書き込みを1回行うので、サーバ起動後の最初の検索が

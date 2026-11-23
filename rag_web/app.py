@@ -1,4 +1,4 @@
-"""Web 画面（FastAPI）。rag_chat_app.py（Streamlit）のチャットとサイドバーの置き換え。
+"""Web 画面（FastAPI）。チャット・Cowork・サイドバー（資料の取り込みと管理）の API と静的ファイルの配信。
 
 - 閲覧・チャット・アップロード・アップロード済み資料の削除は誰でもできる（ログイン不要）
 - 社内資料の差分取り込み（POST /api/ingest）だけは管理者ログインが要る
@@ -16,11 +16,14 @@ import json
 import logging
 import math
 import tempfile
+import threading
+from contextlib import asynccontextmanager
 from collections.abc import Callable, Collection, Iterator
 from datetime import date
 from pathlib import Path
 from typing import Literal
 
+import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -62,8 +65,7 @@ VENDOR_DIR = STATIC_DIR / "vendor"
 # これ1つだけで、選択肢を出しても利用者に選ぶ意味がないため）。変えるときはここを直す。
 CHAT_MODEL = "gpt-oss:20b"
 
-# 段階③で Streamlit 版（rag_chat_app.py）を消すまでの一時的な重複。値は同じに保つ
-# （tests/test_web_app.py が一致を確かめる）。
+# 社内資料以外（技術ドキュメント）のコーパスが空のとき、画面に示す取り込みコマンド。
 DOCS_INGEST_COMMAND = (
     "python -m scripts.fetch_docs のあと "
     "python -m scripts.ingest_source --source-dir docs_source "
@@ -73,6 +75,9 @@ DOCS_INGEST_COMMAND = (
 UPLOAD_CAPTION = (
     "アップロードした資料はDBに残り、全利用者の検索対象になります。"
     "不要になったら下の一覧から削除してください。"
+)
+COWORK_BUSY_MESSAGE = (
+    "ほかの人の生成が混み合っています。少し待ってからもう一度実行してください"
 )
 SHARED_BUSY_MESSAGE = "ほかの人が取り込み中です。終わってからもう一度実行してください"
 TEMPLATE_CAPTION = (
@@ -120,8 +125,8 @@ class Message(BaseModel):
 class ChatBody(BaseModel):
     corpus: Corpus
     temperature: float = Field(ge=0, le=1)
-    # 上限は履歴1件と同じ。Streamlit 版には上限が無く、長い資料を貼って尋ねる使い方を
-    # 狭めないため、異常に大きい入力だけを弾く値にしている。
+    # 上限は履歴1件と同じ。長い資料を貼って尋ねる使い方を狭めないため、
+    # 異常に大きい入力だけを弾く値にしている。
     question: str = Field(min_length=1, max_length=100_000)
     history: list[Message] = Field(max_length=100)
 
@@ -248,7 +253,7 @@ def _template_items(services: Services) -> list[dict]:
         except Exception as error:
             # templates.register は拡張子しか見ないため、中身が壊れた雛形も登録
             # できてしまう。ここで落とすと、その雛形を消せる唯一の画面ごと出せなく
-            # なるため、理由を添えて一覧に残す（rag_chat_app.py の template_dialog と同じ）。
+            # なるため、理由を添えて一覧に残す（画面の雛形一覧もこの行を出す）。
             items.append({"name": path.name, "placeholders": None, "error": str(error)})
         else:
             items.append({"name": path.name, "placeholders": names, "error": None})
@@ -299,7 +304,18 @@ def create_app(
     sessions = SessionStore(settings.session_ttl_s)
     corpora = CorpusCache(services)
 
-    app = FastAPI(title="社内資料RAG", docs_url=None, redoc_url=None, openapi_url=None)
+    # 1本ごとに添付と生成物がメモリに載るため、同時に走る Cowork の数を絞る。
+    cowork_slots = threading.BoundedSemaphore(settings.max_cowork_jobs)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 同期ルートは anyio の既定スレッドプール（既定40）で走る。サイズはここで決める。
+        anyio.to_thread.current_default_thread_limiter().total_tokens = settings.threadpool_size
+        yield
+
+    app = FastAPI(
+        title="社内資料RAG", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     cookie_attributes = _session_cookie_attributes(settings)
 
@@ -321,7 +337,7 @@ def create_app(
             raise HTTPException(401, "管理者としてログインしてください")
 
     def require_ollama() -> None:
-        # 取り込みを始めてから落ちるのを防ぐ。CLI・Streamlit 版と同じ確認。
+        # 取り込みを始めてから落ちるのを防ぐ。CLI と同じ確認。
         try:
             services.check_ollama()
         except EmbeddingError as e:
@@ -514,18 +530,26 @@ def create_app(
         )
         generated_on = today()
 
-        # 技術的負債: 同時に走る Cowork ジョブの数に上限が無い。1本ごとに添付
-        # （最大 RAG_WEB_MAX_UPLOAD_MB）と生成物がメモリに載る
-        # （docs/superpowers/specs/2026-11-22-fastapi-web-ui-design.md「段階③への申し送り」）。
+        # 同時に走る数は RAG_WEB_MAX_COWORK_JOBS まで。待たせずに 503 で断る。
         # 共有ロックは取らない。生成は共有リソースを変えず（添付はDBに入れない）、
         # 取り込み中でも使えるようにする。生成中に雛形が消されたときは、
         # generate_cowork がエラー結果として返す。
-        return {
-            "job_id": jobs.start(
-                lambda: generate_cowork(request, services, corpora, generated_on),
-                shared=False,
-            )
-        }
+        if not cowork_slots.acquire(blocking=False):
+            raise HTTPException(503, COWORK_BUSY_MESSAGE)
+
+        def work() -> dict:
+            try:
+                return generate_cowork(request, services, corpora, generated_on)
+            finally:
+                cowork_slots.release()
+
+        try:
+            job_id = jobs.start(work, shared=False)
+        except BaseException:
+            # ジョブが始まらなければ work の finally は走らない。枠を返さないと減り続ける。
+            cowork_slots.release()
+            raise
+        return {"job_id": job_id}
 
     # --- フォーマットファイル -----------------------------------------------------------
 

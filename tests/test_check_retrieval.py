@@ -64,7 +64,7 @@ def test_the_two_corpora_point_at_different_databases():
 
 
 def test_the_docs_corpus_translates_the_query_and_the_internal_one_does_not():
-    """rag_chat_app.py は技術ドキュメントの検索だけ英語へ訳してから search() を呼ぶ。
+    """アプリ（rag_web/answering.py）は技術ドキュメントの検索だけ英語へ訳してから search() を呼ぶ。
 
     実測でここを通さないと、実行時には存在しないクエリでしきい値を決めることに
     なる（社内資料は日本語のまま検索するので訳してはいけない）。

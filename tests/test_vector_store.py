@@ -517,8 +517,8 @@ def test_replace_that_fails_while_writing_keeps_the_old_chunks(filled_store, mon
 def test_a_failed_write_is_not_committed_by_a_concurrent_one(filled_store, monkeypatch):
     """1つの接続を2スレッドが共有しても、失敗した側のDELETEが確定しないこと。
 
-    Streamlit は @st.cache_resource で接続を1つだけ持ち、全セッションが共有する。
-    2つのセッションが同時に「差分を取り込む」を押し、片方が失敗すると、
+    Web サーバーは接続を1つだけ持ち、全リクエストが共有する。
+    2つのリクエストが同時に「差分を取り込む」を押し、片方が失敗すると、
     直列化しない実装では成功した側の commit が失敗した側の DELETE まで確定させる。
     実測では a.md が丸ごと消え、例外は誰にも出ず、count() は新しい値を正しく
     返した。設計書4.2が消そうとしている故障そのものである。
@@ -566,7 +566,7 @@ def test_a_failed_write_is_not_committed_by_a_concurrent_one(filled_store, monke
 def test_concurrent_reads_on_the_shared_connection_return_their_own_rows(filled_store):
     """読み取りも直列化されていること。
 
-    Streamlit は @st.cache_resource で接続を1つだけ持ち、タブや重なった再実行が
+    Web サーバーは接続を1つだけ持ち、複数のタブや重なったリクエストが
     別々のスレッドから同じ接続を読む。読み取りを直列化しないと、ある問い合わせの
     結果を別の問い合わせのカーソルが受け取る。実測 2026-10-24: 画面で
     revision() が「'NoneType' object is not subscriptable」で落ちた。同じ条件を
@@ -767,3 +767,22 @@ def test_chunks_by_ids_ties_are_broken_by_occurrence_id(empty_store):
     # chunk_index の昇順に返されること
     chunk_indices = [o["chunk_index"] for o in occurrences]
     assert chunk_indices == [0, 1], f"期待: [0, 1], 実際: {chunk_indices}"
+
+
+def test_close_makes_the_store_unusable(tmp_path):
+    import sqlite3
+
+    from ingest.vector_store import open_store
+
+    store = open_store(str(tmp_path / "store.sqlite3"))
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.count()
+
+
+def test_close_twice_is_harmless(tmp_path):
+    from ingest.vector_store import open_store
+
+    store = open_store(str(tmp_path / "store.sqlite3"))
+    store.close()
+    store.close()

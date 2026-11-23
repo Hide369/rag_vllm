@@ -2,7 +2,7 @@
 
 別のマシンで `docs_store.sqlite3`（画面の「検索対象 → 技術ドキュメント」が引くDB）を
 用意するための手順である。社内資料側の `vector_store.sqlite3` はこの手順では扱わない
-（そちらは [Windowsサーバー配置手順](server-deployment-windows.md)）。
+（配置手順は [サーバー配置の案内](server-deployment.md) にあり、書き直しの予定）。
 
 **所要**: 作り直すなら1時間前後、DBをコピーするなら数分。
 
@@ -49,12 +49,12 @@
 
 ## 1. 前提の確認
 
-- Python 3.13 の仮想環境（`myvenv313`）
+- Python 3.13 の仮想環境（`rag_env`）
 - Ollama が動いていること
 - **埋め込みモデル `bge-m3`**（1024次元）。取り込みに必須
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m pip install -r requirements.txt
+.\rag_env\Scripts\python.exe -m pip install -r requirements.txt
 ollama pull bge-m3
 ```
 
@@ -76,7 +76,7 @@ OLLAMA_API_KEY=<認証つきプロキシを挟んでいる場合だけ>
 疎通を先に確かめる。**取り込みを始めてから落ちるのを防ぐため、ここで必ず確認する。**
 
 ```powershell
-.\myvenv313\Scripts\python.exe -c "from dotenv import load_dotenv; load_dotenv(); from ingest import embedder; print(embedder.OLLAMA_HOST); embedder.check_ollama(); print('OK')"
+.\rag_env\Scripts\python.exe -c "from dotenv import load_dotenv; load_dotenv(); from ingest import embedder; print(embedder.OLLAMA_HOST); embedder.check_ollama(); print('OK')"
 ```
 
 `埋め込みモデル bge-m3 がありません` と出たら `ollama pull bge-m3` が済んでいない。
@@ -91,7 +91,7 @@ OLLAMA_API_KEY=<認証つきプロキシを挟んでいる場合だけ>
 走らせるのは資料を最新にしたいときだけである。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.fetch_docs
+.\rag_env\Scripts\python.exe -m scripts.fetch_docs
 ```
 
 **外部通信はここだけである。** `docs_sources.toml` に書かれた宛先しか取りに行かず、
@@ -115,7 +115,7 @@ OLLAMA_API_KEY=<認証つきプロキシを挟んでいる場合だけ>
 ### 2-2. DBへ取り込む
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.ingest_source --source-dir docs_source `
+.\rag_env\Scripts\python.exe -m scripts.ingest_source --source-dir docs_source `
     --db docs_store.sqlite3 --keep-code-blocks
 ```
 
@@ -152,12 +152,12 @@ DB内の総チャンク数: 60914（本文58565種）
 `docs_store.sqlite3`（340MB）をリポジトリ直下へ置くだけでよい。ベクトルは
 `bge-m3` の1024次元で、マシンに依存しない。
 
-**コピー前にStreamlitを止めること。** 書き込み中のファイルをコピーすると壊れる。
+**コピー前に Web 画面（`rag_web`）を止めること。** 書き込み中のファイルをコピーすると壊れる。
 
 置いたら中身を確かめる。
 
 ```powershell
-.\myvenv313\Scripts\python.exe -c "from ingest import store; c = store.open_store('docs_store.sqlite3'); print('チャンク:', c.count(), '本文:', c.chunk_count()); print('整合性:', c.integrity()); print('資料数:', len(store.indexed_sources(c)))"
+.\rag_env\Scripts\python.exe -c "from ingest import store; c = store.open_store('docs_store.sqlite3'); print('チャンク:', c.count(), '本文:', c.chunk_count()); print('整合性:', c.integrity()); print('資料数:', len(store.indexed_sources(c)))"
 ```
 
 期待する出力（2026-09-16 時点）:
@@ -181,7 +181,7 @@ DB内の総チャンク数: 60914（本文58565種）
 画面から確かめるなら:
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m streamlit run rag_chat_app.py
+.\rag_env\Scripts\python.exe -m rag_web
 ```
 
 サイドバーの「検索対象」を**技術ドキュメント**にして、`C#のrecord型の書き方` のように
@@ -191,7 +191,7 @@ DB内の総チャンク数: 60914（本文58565種）
 ### 検索の質まで測る（任意）
 
 ```powershell
-.\myvenv313\Scripts\python.exe -m scripts.check_retrieval --corpus docs
+.\rag_env\Scripts\python.exe -m scripts.check_retrieval --corpus docs
 ```
 
 関連21問で根拠が残ること、圏外11問が空になることを見る（実測 2026-09-13: どちらも全問で期待どおり）。

@@ -1,9 +1,7 @@
 """チャット1回分の処理を、画面に依存しないイベント列として返す。
 
-rag_chat_app.py の生成ブロック（`if st.session_state.generating:` の else 節）を
-移したもの。順序・分岐・利用者に見せる文言は元のまま揃え、Streamlit の描画呼び出し
-だけを取り除いてイベントに置き換えた。イベントの送り出し（NDJSON）は呼び出し側の
-仕事である。
+検索・条件抽出・生成の順序と分岐、利用者に見せる文言をここに集め、描画は
+イベントとして返す。イベントの送り出し（NDJSON）は呼び出し側の仕事である。
 
 イベントは次の5種類で、最後は必ず done か error のどちらか1つになる。
     {"type": "note", "text": str}
@@ -49,7 +47,7 @@ class ChatRequest:
 
 def system_prompt(today: date) -> str:
     # 日付を引数で受けるのは、常駐するサーバーでは起動時の日付が翌日以降も
-    # 残ってしまうため（Streamlit版はスクリプトの再実行ごとに作り直していた）。
+    # 残ってしまうため（リクエストごとに今日の日付で作り直す）。
     return (
         f"あなたは有能なアシスタントです。今日の日付は{today:%Y年%m月%d日}です。\n"
         "日本語で回答して下さい。"
@@ -138,7 +136,7 @@ def _answer_events(
             matched = catalog.select(collection, extraction.conditions)
             relaxed = catalog.relaxations(collection, extraction.conditions)
             # 条件から外れるが上位の機種は画面にだけ出す。モデルに渡すと、設置
-            # できない機種を答えとして挙げる（実測8回中5回。rag_chat_app.py 参照）。
+            # できない機種を答えとして挙げる（実測8回中5回）。
             beyond = catalog.exceeding(collection, extraction.conditions, ranking, matched)
             prompt_table = catalog.format_table(
                 extraction.conditions, matched, relaxed, ranking

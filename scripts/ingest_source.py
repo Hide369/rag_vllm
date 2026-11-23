@@ -1,7 +1,7 @@
 """source/ 配下の資料をベクトルDBへ取り込むCLI。
 
 初回はOCR23ページを含む38ファイル・460チャンクの処理でおよそ24分かかる。
-Streamlitのボタンで24分ブロックするのは現実的でないため、初回はこのCLIから実行する。
+画面のボタンで24分ブロックするのは現実的でないため、初回はこのCLIから実行する。
 
 1ファイル処理するごとにDBへ書き込む。全ファイル分をまとめて書き込むと、
 12分経過時点の失敗ですべてを失う。ファイル単位で保存しておけば、再実行時に
@@ -42,7 +42,7 @@ class IngestReport:
     # 1件も落ちなかった資料はキーを持たない。
     dropped: dict[str, int] = field(default_factory=dict)
     # 全ユニットがナビゲーション判定になり、何も落とさなかった資料のキー。
-    # notify() のログはCLIでしか見えない（Streamlit経路は on_progress を渡して
+    # notify() のログはCLIでしか見えない（画面経路は on_progress を渡して
     # いない）。この情報を報告に載せておかないと、GUIから取り込んだときに
     # 全滅の警告が見えないところで消える。
     kept_all_navigation: list[str] = field(default_factory=list)

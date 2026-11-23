@@ -23,7 +23,7 @@ langchain-text-splitters, ollama, huggingface_hub, pymupdf、計11,993チャン�
 問題なく、直す必要があるのは検索クエリだけである。
 
 このモジュールは検索クエリの翻訳だけを行い、生成には一切関与しない。
-呼び出し側（rag_chat_app.py）は、この関数の戻り値を search() にだけ渡し、
+呼び出し側（rag_web/answering.py の answer_events）は、この関数の戻り値を search() にだけ渡し、
 build_docs_prompt(question, hits) には必ず原文の質問を渡すこと。翻訳を誤っても
 検索の的が外れるだけに留め、回答文の生成過程を汚染しないための設計である。
 

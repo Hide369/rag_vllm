@@ -1,4 +1,4 @@
-# 本システムが直接importするパッケージだけを、myvenv313 に入っている実績のある
+# 本システムが直接importするパッケージだけを、rag_env に入っている実績のある
 # バージョンで固定する。推移的な依存は挙げない。
 # 完全な再現が要る場合は `pip freeze > requirements.lock.txt` を別途取ること。
 #
@@ -25,7 +25,6 @@ numpy==2.5.2
 
 # チャンク分割・UI。ベクトルの保管は標準ライブラリの sqlite3 で行うため依存は増えない
 langchain-text-splitters==1.1.2
-streamlit==1.61.1
 
 # Ollamaへのアクセスと設定
 requests==2.32.3

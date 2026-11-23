@@ -1,7 +1,6 @@
 """コーパスごとの DB・BM25索引・属性一覧のキャッシュと、リランカーの可否確認。
 
-Streamlit の @st.cache_resource（get_collection / get_index / get_schema /
-ensure_reranker）の置き換え。
+コーパスごとに1度だけ開き、全リクエストで共有する。
 """
 
 import threading

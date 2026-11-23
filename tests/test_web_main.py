@@ -15,7 +15,8 @@ def isolated_env(monkeypatch):
     monkeypatch.setattr(web_main, "load_dotenv", lambda *a, **k: None)
     for name in ("RAG_WEB_ADMIN_PASSWORD_HASH", "RAG_WEB_HOST", "RAG_WEB_PORT",
                  "RAG_WEB_MAX_UPLOAD_MB", "RAG_WEB_SESSION_TTL_HOURS",
-                 "RAG_WEB_COOKIE_SECURE"):
+                 "RAG_WEB_COOKIE_SECURE", "RAG_WEB_FORWARDED_ALLOW_IPS",
+                 "RAG_WEB_THREADPOOL_SIZE", "RAG_WEB_MAX_COWORK_JOBS"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -46,6 +47,27 @@ def test_main_starts_uvicorn_with_settings(monkeypatch):
     assert kwargs["host"] == "0.0.0.0"
     assert kwargs["port"] == 9000
     assert app.title is not None
+
+
+def _run_main(monkeypatch):
+    monkeypatch.setenv("RAG_WEB_ADMIN_PASSWORD_HASH", hash_password("correct horse battery", n=2 ** 4))
+    calls = []
+    monkeypatch.setattr(web_main.uvicorn, "run", lambda app, **kw: calls.append(kw))
+    assert web_main.main() == 0
+    return calls[0]
+
+
+def test_main_trusts_proxy_headers_from_localhost_by_default(monkeypatch):
+    kwargs = _run_main(monkeypatch)
+    assert kwargs["proxy_headers"] is True
+    assert kwargs["forwarded_allow_ips"] == "127.0.0.1"
+
+
+def test_main_ignores_proxy_headers_when_allow_list_is_empty(monkeypatch):
+    monkeypatch.setenv("RAG_WEB_FORWARDED_ALLOW_IPS", "")
+    kwargs = _run_main(monkeypatch)
+    assert kwargs["proxy_headers"] is False
+    assert kwargs["forwarded_allow_ips"] is None
 
 
 def test_importing_main_does_not_import_ingest():

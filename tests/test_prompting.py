@@ -35,7 +35,7 @@ def test_prompt_includes_citations_to_separate_the_chunks():
 
     出典を文脈から抜くと、複数のチャンクが区切りなく1つの塊に見え、どの記述が
     どの資料のものかをモデルが取り違える。画面の出典表示は hits から直接
-    組み立てており（rag_chat_app.py の render_hits）、この行には依存しない。
+    組み立てており（rag_web/static/app.js の renderEvidence）、この行には依存しない。
     """
     prompt = build_prompt("経費の上限は", [_hit()])
     assert "a.pdf p.48" in prompt
