@@ -276,9 +276,7 @@ def _generate_document(
     result = _empty_result()
 
     def ask(prompt: str) -> str:
-        return services.ask_json(
-            request.model, prompt, num_ctx=filling.GENERATION_NUM_CTX
-        )
+        return services.ask_json(request.model, prompt)
 
     sources, texts = _collect_evidence(request, services, corpora, result)
 
@@ -319,9 +317,7 @@ def _generate_freeform(
     suffix = request.output_suffix
 
     def ask_text(prompt: str) -> str:
-        return services.ask_text(
-            request.model, prompt, num_ctx=filling.GENERATION_NUM_CTX
-        )
+        return services.ask_text(request.model, prompt)
 
     sources, texts = _collect_evidence(request, services, corpora, result)
 

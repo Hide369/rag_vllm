@@ -22,7 +22,7 @@ def _default_db_paths() -> dict[str, str]:
 @dataclass(frozen=True)
 class Services:
     stream_chat: Callable[[str, list[dict], float], Iterator[str]] = chat.stream_chat
-    # (model, prompt, num_ctx=)。文書生成だけ num_ctx を広げて呼ぶ。
+    # (model, prompt)。出力の上限は指定せず、サーバーの最大長に任せる。
     ask_json: Callable[..., str] = chat.ask_json
     ask_text: Callable[..., str] = chat.ask_text
     # (path, caption_image=)。Cowork の添付から本文を取り出す。

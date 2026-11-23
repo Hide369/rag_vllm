@@ -99,15 +99,15 @@ class Fake:
         self.chat_calls.append((model, messages, temperature))
         yield from ("東", "京")
 
-    def ask_json(self, model, prompt, num_ctx=None):
-        self.ask_json_calls.append((model, prompt, num_ctx))
+    def ask_json(self, model, prompt):
+        self.ask_json_calls.append((model, prompt))
         self.ask_started.set()
         if self.ask_release is not None:
             assert self.ask_release.wait(WAIT_S), "テストが ask_release を set しなかった"
         return self.ask_json_reply
 
-    def ask_text(self, model, prompt, num_ctx=None):
-        self.ask_text_calls.append((model, prompt, num_ctx))
+    def ask_text(self, model, prompt):
+        self.ask_text_calls.append((model, prompt))
         self.text_started.set()
         if self.text_release is not None:
             assert self.text_release.wait(WAIT_S), "テストが text_release を set しなかった"
