@@ -81,8 +81,7 @@ XMLから図形のラベル文字を直接読む（ラベルはすでに構造�
 .\rag_env\Scripts\python.exe -m scripts.ingest_source --with-vlm
 
 # チャット画面を起動する（詳しくは「Web画面の使い方」）
-.
-un_web.ps1
+.\run_web.ps1
 ```
 
 検索結果は常にリランカー（`bge-reranker-v2-m3` のONNX INT8版）による並べ替えを
@@ -257,10 +256,9 @@ BM25に床（フロア）を設けない判断（`ingest/retrieval.py`）が以�
 `python.exe` は自身の位置から環境を解決するため移動の影響を受けない。
 `python.exe -m pytest` や `python.exe -m rag_web` の形ならランチャーを経由しないので常に動く。
 
-（旧 `myvenv313` は作成後にフォルダーを移動したため、`Scripts\*.exe` が壊れた経緯がある
-`myvenv313` は過去の名前である。`rag_env` も、作成後にフォルダーを移動すると同じ状態になる。
-`.exe` を使えるようにしたい場合は該当パッケージを
-`python.exe -m pip install --force-reinstall --no-deps <package>` で入れ直す。）
+（`myvenv313` は過去の名前で、作成後にフォルダーを移動したため `Scripts\*.exe` が壊れた経緯がある。
+`rag_env` も、作成後にフォルダーを移動すると同じ状態になる。`.exe` を使えるようにしたい場合は
+該当パッケージを `python.exe -m pip install --force-reinstall --no-deps <package>` で入れ直す。）
 
 ## Web画面の使い方
 
@@ -281,7 +279,8 @@ py -3.13 -m venv rag_env
 ```
 
 表示された `RAG_WEB_ADMIN_PASSWORD_HASH=...` の行を `.env` に追記する。ほかの
-`RAG_WEB_*`（ホスト・ポート・アップロード上限・セッション時間・Cookie の Secure）は
+`RAG_WEB_*`（ホスト・ポート・アップロード上限・セッション時間・Cookie の Secure・
+前段プロキシの信頼先・スレッドプールの大きさ・Cowork の同時実行数）は
 任意で、項目と既定値は `.env.example` にある。
 
 ```powershell
@@ -451,8 +450,7 @@ Ollamaに肩代わりさせられる。現在Colab側に置いているのは `g
 5. いつも通り起動する
 
    ```powershell
-   .
-un_web.ps1
+   .\run_web.ps1
    ```
 
    生成・埋め込みともにColab側のOllamaで処理される。
