@@ -35,7 +35,10 @@ Windows（VS Code + Claude Code 拡張）
 vLLM は Anthropic Messages API（`/v1/messages`）を自分で話すので、変換プロキシ（LiteLLM など）は
 挟まない。認証は、モデルが vLLM の `--api-key`（`Authorization: Bearer`）、MCP が Nginx の
 トークン確認である。Claude Code は Basic 認証のヘッダーを送れないため、`/llm/` には
-Basic 認証を重ねない。
+Basic 認証を重ねない。`--api-key` が守るのは `/v1` 系のパスだけなので、Nginx は `/llm/v1/` だけを
+vLLM へ通し、それ以外（`/llm/invocations`、`/llm/metrics` など）は 404 にする。
+ベース URL `https://<GB10>/llm` に Claude Code が `/v1/messages` を足すと `/llm/v1/messages` になり、
+この経路に合う。
 
 ## 1. GB10 側で確かめる
 

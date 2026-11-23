@@ -23,7 +23,7 @@ RAG の画面（`rag_web/`）、社内資料の検索（MCP）、vLLM 3つを置
         ▼
 GB10  Nginx（TLS・認証）                      deploy/gb10/nginx-rag.conf
  ├ /       Basic 認証 ─▶ rag_web            127.0.0.1:8502  （systemd: rag-web.service）
- ├ /llm/   vLLM の --api-key ─▶ 生成の vLLM  127.0.0.1:8001  gpt-oss-120b
+ ├ /llm/v1/ vLLM の --api-key ─▶ 生成の vLLM 127.0.0.1:8001  gpt-oss-120b（/llm/ のほかは 404）
  └ /mcp    Bearer トークン ─▶ rag_mcp_server 127.0.0.1:8080  （systemd: rag-mcp.service）
                                            │
  vLLM（Docker compose）                     │ rag_web / MCP から（127.0.0.1）
@@ -45,7 +45,7 @@ cat /etc/os-release | head -3     # Ubuntu 24.04（DGX OS 7）
 uname -m                          # aarch64
 nvidia-smi                        # GB10 が見え、ドライバーが載っていること
 docker --version && docker compose version
-docker run --rm --gpus all nvcr.io/nvidia/vllm:26.04-py3 nvidia-smi   # コンテナから GPU が見えること
+docker run --rm --gpus all --entrypoint nvidia-smi nvcr.io/nvidia/vllm:26.04-py3   # コンテナから GPU が見えること（NGC の entrypoint に依らない）
 ```
 
 - `compose.yaml` のイメージは NVIDIA の NGC のコンテナ（`26.04-py3` は vLLM 0.19.0、
@@ -145,9 +145,11 @@ HEAD を繰り返し、失敗する）。
 
 ```bash
 cd /opt/rag/deploy/gb10
-docker compose --env-file /etc/rag/vllm.env up -d
-docker compose --env-file /etc/rag/vllm.env logs -f vllm-chat
+sudo docker compose --env-file /etc/rag/vllm.env up -d
+sudo docker compose --env-file /etc/rag/vllm.env logs -f vllm-chat
 ```
+
+`/etc/rag/vllm.env` は root だけが読める（600）ので、`docker compose` は `sudo` で実行する。
 
 起動は生成 → 画像説明 → 埋め込みの順（空きメモリの確認が重ならないように、
 `depends_on` と healthcheck で並べてある）。初回は CUDA グラフの準備などで10分以上かかる。
@@ -193,7 +195,7 @@ curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8003/v1/models | head -
    割合を下げる（例 0.7）ことを勧めている。ほかが起動できないなら、まず生成の割合を下げる。
 
 足りないときの削り方は、①画像説明を常駐させず、取り込み時だけ起動する
-（`docker compose stop vllm-vlm` で止め、取り込みの間だけ `start`）、②画像説明を
+（`sudo docker compose stop vllm-vlm` で止め、取り込みの間だけ `start`）、②画像説明を
 Qwen3-VL-8B に戻す、の順。①のとき、画像説明が止まっていても取り込みは動き、画像の説明が
 付かない理由が出る。
 
@@ -266,6 +268,10 @@ sudo nginx -t && sudo systemctl reload nginx
   なら 70,953,643。rag_web は本文を全部メモリに読んでから 413 を返すため、Nginx で切る。
 - `/` と `/llm/` は `proxy_buffering off`（チャットの NDJSON と SSE を溜め込まない）、
   `proxy_read_timeout 900s`（生成が長くても切れない）。
+- `/llm/` は `/llm/v1/` だけを vLLM へ通し、残りは 404 にする。vLLM の `--api-key` が守るのは
+  `/v1` 系のパス（`/v1` `/v2` `/inference` `/cohere`）だけで、`/invocations`・`/metrics`・
+  `/tokenize`・`/pause`・`/abort_requests` などは鍵なしで通るため、Nginx で塞ぐ。
+  `/mcp` は MCP SDK のパスが `/mcp` 固定なので、完全一致（`location = /mcp`）にしてある。
 - `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`: ログイン試行制限を
   利用者ごとに数える。
 - スレッドプール（`RAG_WEB_THREADPOOL_SIZE`、既定 40）と同時 Cowork 数
@@ -280,6 +286,10 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/                       
 curl -sk -u <利用者名> -o /dev/null -w "%{http_code}\n" https://<GB10>/           # 200
 curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/mcp                      # 401（トークン無し）
 curl -sk -H "Authorization: Bearer $KEY" https://<GB10>/llm/v1/models | head -c 200   # gpt-oss-120b
+curl -sk -o /dev/null -w "%{http_code}
+" https://<GB10>/llm/invocations                  # 404（/v1 以外は塞ぐ）
+curl -sk -o /dev/null -w "%{http_code}
+" https://<GB10>/llm/metrics                      # 404
 ```
 
 - 画面でチャットを送り、回答が1文字ずつ（まとめてではなく）流れることを見る
@@ -297,6 +307,7 @@ curl -sk -H "Authorization: Bearer $KEY" https://<GB10>/llm/v1/models | head -c 
 - [ ] `scripts/check_retrieval.py docs` と `internal` が通る（`internal` には、BM25 だけで
   引く回帰ケースが1件落ちる既知の問題がある。vLLM とは無関係で、この切り替えの前から
   ある。2026-11-23、Colab で確認）
+- [ ] `/llm/invocations` と `/llm/metrics` が 404 になる（鍵なしで通る vLLM のパスが外へ出ていない）
 - [ ] Nginx 越しでログイン試行制限が利用者ごとに数えられる
 - [ ] 画像説明（Qwen3-VL-30B-A3B、FP8）の質。Colab では 8B の確認も済んでいない
   （実測はしていない。Colab での確認待ち）
