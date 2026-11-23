@@ -361,7 +361,8 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     assert response.json() == {
         "corpus": "internal",
         "chunk_count": 0,
-        "source_dir_name": "source",
+        # 取り込み元のフォルダ名はサーバーの内部の事情なので、管理者にしか返さない
+        "source_dir_name": None,
         "docs_ingest_command": DOCS_INGEST_COMMAND,
         "reranker": {"state": "unchecked", "reason": None},
         "shared_busy": False,
@@ -378,6 +379,16 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     assert fake.reranker_checks == 1
 
     assert client.get("/api/status", params={"corpus": "other"}).status_code == 422
+
+
+def test_status_reports_source_dir_name_only_to_admin(client, fake):
+    assert client.get("/api/status").json()["source_dir_name"] is None
+
+    _login(client)
+    assert client.get("/api/status").json()["source_dir_name"] == "source"
+
+    client.post("/api/logout", headers=CSRF)
+    assert client.get("/api/status").json()["source_dir_name"] is None
 
 
 def _record_other_embedding_model(path):

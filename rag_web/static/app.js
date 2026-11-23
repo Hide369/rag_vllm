@@ -351,7 +351,8 @@ async function loadStatus() {
       : "");
     show("docs-command", status.chunk_count === 0 ? "" : `更新は CLI で行います: ${status.docs_ingest_command}`);
   } else {
-    show("source-dir", `取り込み元: ${status.source_dir_name}/`);
+    // 管理者にだけ届く。利用者には null で、何も出さない
+    show("source-dir", status.source_dir_name ? `取り込み元: ${status.source_dir_name}/` : "");
   }
   const reranker = status.reranker || {};
   // reason は「Rerankerで並べ替えません: …」まで組み立て済みで届く（rag_web/corpora.py）
@@ -364,6 +365,8 @@ function applyAdmin() {
   setHidden("login-form", state.admin);
   setHidden("logged-in", !state.admin);
   setHidden("ingest", !state.admin);
+  // ログアウトした瞬間に消す。ログインしたときの表示は、次の loadStatus が名前を取ってくる
+  if (!state.admin) show("source-dir", "");
 }
 
 async function loadMe() {
@@ -389,6 +392,8 @@ $("login-form").addEventListener("submit", async (event) => {
     if (button) button.disabled = false;
   }
   applyAdmin();
+  // 取り込み元の名前はログイン後にしか返らないので、取り直す
+  if (state.admin) loadStatus();
 });
 
 $("logout").addEventListener("click", async () => {
