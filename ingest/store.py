@@ -61,8 +61,17 @@ def ensure_embedding_model(collection, model: str, dim: int) -> None:
     読むだけの利用者（MCPサーバー、画面の検索）も通す。検索語のベクトルを
     別のモデルで作ると、例外は出ずに距離だけが意味を失うため、開く時点で止める。
     """
-    recorded_model = collection.get_meta(_MODEL_KEY) or LEGACY_EMBEDDING_MODEL
-    recorded_dim = int(collection.get_meta(_DIM_KEY) or LEGACY_EMBEDDING_DIM)
+    recorded_model = collection.get_meta(_MODEL_KEY)
+    recorded_dim = collection.get_meta(_DIM_KEY)
+    if recorded_model is None and recorded_dim is None and collection.count() == 0:
+        # 新しい空のDBには、まだ何のモデルで作ったかという事実が無い。bge-m3 と
+        # みなすと、「新しい DB に取り込み直してください」という案内どおりに
+        # 作った DB まで止めてしまう。最初の書き込みで設定のモデルを記録する。
+        return
+    # 中身があるのに記録が無いDBは、記録を持たなかった時代（bge-m3・1024次元）の
+    # ものである。
+    recorded_model = recorded_model or LEGACY_EMBEDDING_MODEL
+    recorded_dim = int(recorded_dim or LEGACY_EMBEDDING_DIM)
     if _canonical_model(recorded_model) == _canonical_model(model) and recorded_dim == dim:
         return
     raise EmbeddingMismatchError(

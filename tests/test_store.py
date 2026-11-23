@@ -128,6 +128,7 @@ def test_all_documents_on_an_empty_collection_returns_two_empty_lists(collection
 
 
 def test_an_unrecorded_store_is_treated_as_bge_m3_1024(collection):
+    _add(collection, "a.md", "h1")  # 中身がある（記録を持たない時代のDB）
     store.ensure_embedding_model(collection, "bge-m3", 1024)
     with pytest.raises(store.EmbeddingMismatchError) as raised:
         store.ensure_embedding_model(collection, "qwen3-embedding", 2560)
@@ -136,6 +137,7 @@ def test_an_unrecorded_store_is_treated_as_bge_m3_1024(collection):
 
 
 def test_a_different_dimension_stops_even_with_the_same_name(collection):
+    _add(collection, "a.md", "h1")
     with pytest.raises(store.EmbeddingMismatchError):
         store.ensure_embedding_model(collection, "bge-m3", 768)
 
@@ -190,3 +192,31 @@ def test_open_store_stops_a_mismatched_db_and_closes_it(tmp_path, monkeypatch):
     first.close()
     with pytest.raises(store.EmbeddingMismatchError):
         open_store(path)
+
+
+def test_an_empty_unrecorded_store_adopts_the_configured_model_on_first_write(
+    collection, monkeypatch
+):
+    """新しい空のDBは何のモデルでも受け入れ、最初の書き込みで記録する。
+    止めると「新しい DB に取り込み直してください」の案内が実行できない。"""
+    monkeypatch.setenv("VLLM_EMBED_MODEL", "other-1024")
+    store.ensure_embedding_model(collection, "qwen3-embedding", 2560)
+
+    _add(collection, "a.md", "h1")
+
+    assert collection.get_meta("embedding_model") == "other-1024"
+    assert collection.get_meta("embedding_dim") == str(EMBED_DIM)
+    store.ensure_embedding_model(collection, "other-1024", EMBED_DIM)
+    with pytest.raises(store.EmbeddingMismatchError):
+        store.ensure_embedding_model(collection, "bge-m3", 1024)
+
+
+def test_a_non_empty_unrecorded_store_still_stops_a_non_bge_m3_setting(collection):
+    _add(collection, "a.md", "h1")
+    with pytest.raises(store.EmbeddingMismatchError):
+        store.ensure_embedding_model(collection, "other-1024", 1024)
+
+
+def test_open_store_accepts_a_brand_new_path_with_another_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_EMBED_MODEL", "other-1024")
+    open_store(str(tmp_path / "new.sqlite3")).close()
