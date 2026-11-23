@@ -62,7 +62,9 @@ def _is_captionable_picture(shape) -> bool:
     )
 
 
-def _picture_block(shape, slide_number: int, path_name: str, caption_image, ocr_bytes) -> str | None:
+def _picture_block(
+    shape, slide_number: int, path_name: str, caption_image, ocr_bytes, seen_blobs: set[bytes]
+) -> str | None:
     try:
         blob = shape.image.blob
     except Exception as error:
@@ -71,6 +73,13 @@ def _picture_block(shape, slide_number: int, path_name: str, caption_image, ocr_
             file=sys.stderr,
         )
         return None
+    # 同じスライドに同じ画像が2つ目以降で出たら説明しない。実データでは1枚の画像を
+    # トリミングだけ変えて並べていたが、blob はトリミング前の元画像なので、説明も
+    # OCRも同じものになり、ほぼ同じチャンクが検索の枠を重ねて取っていた。
+    # 別のスライドでは出典が変わるため、判定はスライドの中に限る。
+    if blob in seen_blobs:
+        return None
+    seen_blobs.add(blob)
     return describe_image(
         blob, caption_image, ocr_bytes=ocr_bytes, label=f"{path_name} スライド{slide_number}"
     )
@@ -124,13 +133,16 @@ def _blocks(
     content_shapes.sort(key=_position)
 
     blocks = []
+    seen_blobs: set[bytes] = set()
     for shape in content_shapes:
         if shape.has_text_frame:
             cleaned = _clean(shape.text_frame.text, slide_number)
             if cleaned:
                 blocks.append(cleaned)
         else:
-            block = _picture_block(shape, slide_number, path_name, caption_image, ocr_bytes)
+            block = _picture_block(
+                shape, slide_number, path_name, caption_image, ocr_bytes, seen_blobs
+            )
             if block is not None:
                 blocks.append(block)
 

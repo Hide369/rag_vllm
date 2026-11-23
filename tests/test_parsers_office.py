@@ -429,6 +429,60 @@ def test_large_picture_is_captioned(pptx_with_large_picture):
     assert any(u.vlm for u in units)
 
 
+def _pptx_with_pictures(tmp_path, slides):
+    """slides: スライドごとの画像の並び。同じオブジェクトは同じバイト列として貼る。"""
+    prs = Presentation()
+    for pictures in slides:
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        box = slide.shapes.add_textbox(Inches(1), Inches(0.5), Inches(4), Inches(1))
+        box.text_frame.text = "タイトル"
+        for i, png in enumerate(pictures):
+            slide.shapes.add_picture(
+                io.BytesIO(png), Inches(0.5 + 4.5 * i), Inches(2), Inches(4), Inches(3)
+            )
+    path = tmp_path / "同じ画像.pptx"
+    prs.save(path)
+    return path
+
+
+def test_same_picture_twice_on_a_slide_is_described_once(tmp_path):
+    # 実データ（生成AI活用セミナー スライド11）では、1枚の画像をトリミングだけ変えて
+    # 左右に2つ貼っていた。shape.image.blob はトリミング前の元画像なので、説明も
+    # OCRも同じものが2回でき、ほぼ同じチャンクが検索の枠を2つ取っていた。
+    png = _png_bytes(800, 600)
+    path = _pptx_with_pictures(tmp_path, [[png, png]])
+    calls = []
+    units = parse_pptx(
+        path,
+        caption_image=lambda blob: calls.append(blob) or "図表です。",
+        ocr_bytes=lambda _bytes: "",
+    )
+    assert len(calls) == 1
+    assert sum(u.text.count("[図の説明] 図表です。") for u in units) == 1
+
+
+def test_different_pictures_on_a_slide_are_each_described(tmp_path):
+    path = _pptx_with_pictures(
+        tmp_path, [[_png_bytes(800, 600), _png_bytes(800, 600, "blue")]]
+    )
+    calls = []
+    parse_pptx(
+        path,
+        caption_image=lambda blob: calls.append(blob) or "図表です。",
+        ocr_bytes=lambda _bytes: "",
+    )
+    assert len(calls) == 2
+
+
+def test_same_picture_on_two_slides_is_described_on_each(tmp_path):
+    # 出典はスライド単位で示すため、別のスライドに同じ画像があれば、それぞれに説明を残す。
+    png = _png_bytes(800, 600)
+    path = _pptx_with_pictures(tmp_path, [[png], [png]])
+    units = parse_pptx(path, caption_image=lambda _blob: "図表です。", ocr_bytes=lambda _b: "")
+    described = {u.location for u in units if "[図の説明] 図表です。" in u.text}
+    assert described == {1, 2}
+
+
 def test_small_picture_is_not_captioned(pptx_with_small_picture):
     def _fail(_bytes):
         raise AssertionError("閾値未満の画像でcaption_imageが呼ばれてはいけない")
