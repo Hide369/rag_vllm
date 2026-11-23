@@ -12,7 +12,9 @@ import sys
 
 from .auth import hash_password
 
-MIN_LENGTH = 12
+# 利用者の指定（2026-11-23）。管理者ログインは差分取り込みだけを守り、試行回数の制限
+# （auth.LoginThrottle）もあるため、覚えやすさを優先して9文字にしている。
+MIN_LENGTH = 9
 
 
 def main() -> int:
