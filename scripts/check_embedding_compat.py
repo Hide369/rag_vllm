@@ -66,7 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"エラー: {error}", file=sys.stderr)
         return 2
 
-    # DB が無いパスを開くと、空の DB が黙って作られる。何を測ったかを必ず出す。
+    # DB が無いパスを開くと、空の DB が黙って作られる。作らせずに止める。
+    if not args.db.exists():
+        print(f"エラー: DB が見つかりません: {args.db}", file=sys.stderr)
+        return 2
+    # 何を測ったかを必ず出す。
     print(f"対象: {args.db.resolve()}")
     print(f"vLLM 埋め込み: {settings.embed_url}（{settings.embed_model}）")
     # store.open_store ではなく生の open_store を使う。食い違いの確認で止まると、
@@ -82,16 +86,16 @@ def main(argv: list[str] | None = None) -> int:
 
     texts = [text for text, _ in samples]
     stored = _normalised(np.stack([vector for _, vector in samples]))
+    session = new_session(settings)
     try:
         fresh = _normalised(
-            np.asarray(
-                embedder.embed_texts(texts, session=new_session(settings)),
-                dtype="float32",
-            )
+            np.asarray(embedder.embed_texts(texts, session=session), dtype="float32")
         )
     except embedder.EmbeddingError as error:
         print(f"エラー: {error}", file=sys.stderr)
         return 2
+    finally:
+        session.close()
 
     if fresh.shape != stored.shape:
         print(

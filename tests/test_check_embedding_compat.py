@@ -71,11 +71,39 @@ def test_the_threshold_can_be_lowered(db_path, monkeypatch):
 
 def test_an_empty_db_says_so_and_exits_with_2(tmp_path, monkeypatch, capsys):
     _fake_embedder(monkeypatch, 0.0)
+    empty = tmp_path / "empty.sqlite3"
+    open_store(str(empty)).close()
 
-    code = check_embedding_compat.main(["--db", str(tmp_path / "empty.sqlite3")])
+    code = check_embedding_compat.main(["--db", str(empty)])
 
     assert code == 2
     assert "空" in capsys.readouterr().out
+
+
+def test_a_missing_db_exits_with_2_without_creating_a_file(tmp_path, monkeypatch, capsys):
+    """存在しないパスを開くと空の DB が黙って作られ、誤ったパスが「空」に見えてしまう。"""
+    _fake_embedder(monkeypatch, 0.0)
+    missing = tmp_path / "typo.sqlite3"
+
+    code = check_embedding_compat.main(["--db", str(missing)])
+
+    assert code == 2
+    assert "見つかりません" in capsys.readouterr().err
+    assert not missing.exists()
+
+
+def test_the_session_is_closed(db_path, monkeypatch):
+    closed = []
+
+    class _Session:
+        def close(self):
+            closed.append(True)
+
+    _fake_embedder(monkeypatch, 0.0)
+    monkeypatch.setattr(check_embedding_compat, "new_session", lambda settings: _Session())
+
+    assert check_embedding_compat.main(["--db", str(db_path)]) == 0
+    assert closed == [True]
 
 
 def test_an_embedding_failure_exits_with_2(db_path, monkeypatch, capsys):
