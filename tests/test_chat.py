@@ -126,6 +126,34 @@ def test_ask_gives_up_after_four_attempts(monkeypatch, failure):
     assert len(session.payloads) == 4
 
 
+@pytest.mark.parametrize("ask", [ask_json, ask_text])
+@pytest.mark.parametrize("content", [None, "", "  \n "])
+def test_empty_content_fails_fast_with_finish_reason(monkeypatch, ask, content):
+    """空の本文は一時的な障害ではない（思考で上限を使い切った等）。再試行すると
+    毎回フル生成になるうえ、接続失敗に見える文面で原因が隠れる。"""
+    monkeypatch.setattr(chat.time, "sleep", lambda _s: pytest.fail("再試行しない"))
+    response = _FakeResponse(
+        {"choices": [{"message": {"content": content}, "finish_reason": "length"}]}
+    )
+    session = _FakeSession([response])
+    with pytest.raises(ChatError) as info:
+        ask("m", "p", session=session)
+    assert str(info.value) == (
+        "応答に本文がありません（finish_reason=length。思考で出力の上限を使い切った可能性があります）"
+    )
+    assert len(session.payloads) == 1
+
+
+def test_empty_content_message_omits_hint_unless_length(monkeypatch):
+    monkeypatch.setattr(chat.time, "sleep", lambda _s: pytest.fail("再試行しない"))
+    response = _FakeResponse(
+        {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
+    )
+    with pytest.raises(ChatError) as info:
+        ask_text("m", "p", session=_FakeSession([response]))
+    assert str(info.value) == "応答に本文がありません（finish_reason=stop）"
+
+
 def test_auth_failure_is_not_retried_and_becomes_chat_error(monkeypatch):
     """ChatError に包む（AuthError の子ではない）。rag_web の既存ハンドラが
     ChatError だけ見ていれば認証の失敗も拾えるようにするため。"""

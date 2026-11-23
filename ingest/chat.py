@@ -31,6 +31,13 @@ def _auth_error_to_chat_error(error: AuthError) -> ChatError:
     return ChatError(str(error))
 
 
+def _empty_content_message(finish_reason) -> str:
+    message = f"応答に本文がありません（finish_reason={finish_reason}"
+    if finish_reason == "length":
+        message += "。思考で出力の上限を使い切った可能性があります"
+    return message + "）"
+
+
 def _chat_completions_url() -> str:
     return f"{load_vllm_settings().chat_url}/v1/chat/completions"
 
@@ -48,10 +55,13 @@ def _complete(payload: dict, session) -> str:
                 # 401/403 は何度送っても通らないので、再試行の対象にしない。
                 raise_for_auth(response, url)
                 response.raise_for_status()
-                content = response.json()["choices"][0]["message"].get("content")
-                if content is None:
-                    # 思考で出力の上限を使い切ると、本文が空のまま返ることがある。
-                    raise ValueError("応答に本文（content）がありません")
+                choice = response.json()["choices"][0]
+                content = choice["message"].get("content")
+                if content is None or not content.strip():
+                    # 思考で出力の上限を使い切った、または途中で切れたときの空応答。
+                    # temperature=0 では同じ結果を繰り返し、再試行は毎回フル生成になるので
+                    # 再試行せず、原因が分かる文面で即座に止める。
+                    raise ChatError(_empty_content_message(choice.get("finish_reason")))
                 return content
             except AuthError as error:
                 raise _auth_error_to_chat_error(error) from error
