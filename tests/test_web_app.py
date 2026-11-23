@@ -80,10 +80,9 @@ class Fake:
         # 設定すると ask_json はこれが set されるまで返らない（生成の途中で止める）。
         self.ask_release: threading.Event | None = None
         self.ask_started = threading.Event()
-        # 雛形なしの生成（ask_text）を止める・失敗させる。Cowork の同時実行数のテスト用。
+        # 雛形なしの生成（ask_text）を止める。Cowork の同時実行数のテスト用。
         self.text_release: threading.Event | None = None
         self.text_started = threading.Event()
-        self.text_error: Exception | None = None
 
     def open_store(self, path):
         collection = vector_store.open_store(path)
@@ -112,8 +111,6 @@ class Fake:
         self.text_started.set()
         if self.text_release is not None:
             assert self.text_release.wait(WAIT_S), "テストが text_release を set しなかった"
-        if self.text_error is not None:
-            raise self.text_error
         return "# 文書\n\n本文\n"
 
     def parse(self, path, caption_image=None):
@@ -1211,14 +1208,19 @@ def test_cowork_slot_is_returned_when_the_job_finishes(fake, jobs):
         assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
 
 
-def test_cowork_slot_is_returned_when_the_job_raises(fake, jobs):
-    fake.text_error = RuntimeError("生成に失敗")
+def test_cowork_slot_is_returned_when_the_job_raises(fake, jobs, monkeypatch):
+    # generate_cowork は例外を捕まえてエラー結果として返すため、偽の ask_text で
+    # 失敗させても work の外へは出ない。work 自体から例外を出して finally を通す。
+    def explode(*args, **kwargs):
+        raise RuntimeError("生成に失敗")
+
     with _client(fake, jobs, max_cowork_jobs=1) as client:
+        monkeypatch.setattr("rag_web.app.generate_cowork", explode)
         response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
         assert response.status_code == 200
         outcome = _job_result(client, jobs, response.json()["job_id"])
-        assert outcome["state"] in ("done", "failed")
-        fake.text_error = None
+        assert outcome == {"state": "failed", "error": "生成に失敗"}
+        monkeypatch.undo()
         assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
 
 
