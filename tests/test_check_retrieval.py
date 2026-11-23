@@ -229,3 +229,24 @@ def test_a_db_built_with_another_model_stops_main(monkeypatch, tmp_path, capsys)
 
     assert check_retrieval.main() == 2
     assert "qwen3-embedding" in capsys.readouterr().err
+
+
+def test_the_regression_passes_on_any_slide_that_covers_fine_tuning():
+    # 実測 2026-11-23 の上位3件。スライド11は5位だが、上位はどれもファインチューニングを
+    # 本文で扱うスライドである。
+    top = [
+        ("セミナー資料/CNN画像認識セミナー.pptx スライド18（OCR）", 43.24),
+        ("セミナー資料/CNN画像認識セミナー.pptx スライド18（OCR）", 42.77),
+        ("セミナー資料/RAGセミナー.pptx スライド16（OCR）", 42.73),
+    ]
+    assert check_retrieval.regression_hit(top, check_retrieval.REGRESSION_EXPECTED)
+
+
+def test_the_regression_fails_when_navigation_slides_fill_the_top():
+    # このケースが捕まえたい失敗（2026-09-07 の記録）: 章扉・目次が上位を占める。
+    top = [
+        ("生成AI活用セミナー.pptx スライド2", 20.1),
+        ("生成AI活用セミナー.pptx スライド3", 19.8),
+        ("セミナー資料/RAGセミナー.pptx スライド2", 18.0),
+    ]
+    assert not check_retrieval.regression_hit(top, check_retrieval.REGRESSION_EXPECTED)
