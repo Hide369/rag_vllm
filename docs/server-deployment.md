@@ -286,10 +286,8 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/                       
 curl -sk -u <利用者名> -o /dev/null -w "%{http_code}\n" https://<GB10>/           # 200
 curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/mcp                      # 401（トークン無し）
 curl -sk -H "Authorization: Bearer $KEY" https://<GB10>/llm/v1/models | head -c 200   # gpt-oss-120b
-curl -sk -o /dev/null -w "%{http_code}
-" https://<GB10>/llm/invocations                  # 404（/v1 以外は塞ぐ）
-curl -sk -o /dev/null -w "%{http_code}
-" https://<GB10>/llm/metrics                      # 404
+curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/llm/invocations                  # 404（/v1 以外は塞ぐ）
+curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/llm/metrics                      # 404
 ```
 
 - 画面でチャットを送り、回答が1文字ずつ（まとめてではなく）流れることを見る
