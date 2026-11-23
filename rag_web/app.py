@@ -408,11 +408,13 @@ def create_app(
     # --- 状態・チャット -----------------------------------------------------------------
 
     @app.get("/api/status")
-    def status(corpus: Corpus = INTERNAL) -> dict:
+    def status(request: Request, corpus: Corpus = INTERNAL) -> dict:
         return {
             "corpus": corpus,
             "chunk_count": corpora.collection(corpus).count(),
-            "source_dir_name": services.source_dir.name,
+            # 取り込み元はサーバー内部のフォルダで、使うのは取り込みを走らせる管理者だけ。
+            # 画面で隠すだけでなく、利用者には値そのものを返さない。
+            "source_dir_name": services.source_dir.name if is_admin(request) else None,
             "docs_ingest_command": DOCS_INGEST_COMMAND,
             "reranker": corpora.reranker_status(),
             "shared_busy": jobs.shared_busy(),
