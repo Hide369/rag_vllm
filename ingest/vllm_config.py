@@ -36,6 +36,10 @@ class AuthError(Exception):
     """認証の拒否（401/403）。各クライアントが自分のエラー型へ包み直す。"""
 
 
+class ClientRequestError(Exception):
+    """再送しても直らない 4xx（401/403 以外）。サーバーが返した理由を本文に持つ。"""
+
+
 def _read_url(environ: Mapping[str, str], name: str) -> str:
     url = environ.get(name) or _URL_DEFAULTS[name]
     url = url.rstrip("/")
@@ -84,6 +88,22 @@ def raise_for_auth(response: requests.Response, url: str) -> None:
             f"{url} が認証を拒否しました（HTTP {response.status_code}）。"
             "VLLM_API_KEY を確かめてください"
         )
+
+
+_ERROR_BODY_LIMIT = 500
+
+
+def raise_for_status_with_body(response: requests.Response, url: str) -> None:
+    """4xx（401/403 以外）は再送しても直らないので ClientRequestError にし、vLLM が返した
+    理由（モデル名の取り違えなど）を本文から添える。5xx は従来どおり HTTPError のまま
+    返し、呼び出し側の再試行に任せる。認証の拒否は先に raise_for_auth で止めておく。
+    """
+    if 400 <= response.status_code < 500:
+        body = (response.text or "").strip()[:_ERROR_BODY_LIMIT]
+        raise ClientRequestError(
+            f"{url} がリクエストを拒否しました（HTTP {response.status_code}）: {body or '本文なし'}"
+        )
+    response.raise_for_status()
 
 
 def list_model_ids(session, base_url: str) -> list[str]:

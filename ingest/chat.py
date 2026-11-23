@@ -15,7 +15,14 @@ from collections.abc import Iterator
 
 import requests
 
-from ingest.vllm_config import AuthError, load_vllm_settings, new_session, raise_for_auth
+from ingest.vllm_config import (
+    AuthError,
+    ClientRequestError,
+    load_vllm_settings,
+    new_session,
+    raise_for_auth,
+    raise_for_status_with_body,
+)
 
 _MAX_ATTEMPTS = 4  # embedder.pyと同じ: 初回 + 3回の再試行（1秒 → 2秒 → 4秒）
 _TIMEOUT = 600
@@ -23,12 +30,6 @@ _TIMEOUT = 600
 
 class ChatError(Exception):
     """チャット生成に失敗した。"""
-
-
-def _auth_error_to_chat_error(error: AuthError) -> ChatError:
-    # rag_web のハンドラは ChatError だけを見ている。AuthError を素通しすると
-    # 認証の失敗だけ画面に出ず 500 になるため、同じ文言のまま包み直す。
-    return ChatError(str(error))
 
 
 def _empty_content_message(finish_reason) -> str:
@@ -54,7 +55,7 @@ def _complete(payload: dict, session) -> str:
                 response = session.post(url, json=payload, timeout=_TIMEOUT)
                 # 401/403 は何度送っても通らないので、再試行の対象にしない。
                 raise_for_auth(response, url)
-                response.raise_for_status()
+                raise_for_status_with_body(response, url)
                 choice = response.json()["choices"][0]
                 content = choice["message"].get("content")
                 if content is None or not content.strip():
@@ -63,8 +64,9 @@ def _complete(payload: dict, session) -> str:
                     # 再試行せず、原因が分かる文面で即座に止める。
                     raise ChatError(_empty_content_message(choice.get("finish_reason")))
                 return content
-            except AuthError as error:
-                raise _auth_error_to_chat_error(error) from error
+            except (AuthError, ClientRequestError) as error:
+                # 4xx は再送しても同じ結果になるので、再試行せず理由つきで止める。
+                raise ChatError(str(error)) from error
             except (requests.RequestException, KeyError, IndexError, ValueError) as error:
                 last_error = error
                 if attempt < _MAX_ATTEMPTS - 1:
@@ -125,6 +127,7 @@ def stream_chat(
     ストリームはSSE（`data: {json}` の行、終端は `data: [DONE]`）。空行とコメント行
     （`:` 始まり。keep-alive に使われる）は読み飛ばす。本文は choices[0].delta.content
     だけを出し、role だけの差分・choices が空のチャンク・思考の差分は出さない。
+    `[DONE]` も finish_reason も来ないまま終わったストリームは途中で切れたものとして ChatError にする。
     呼び出し側がジェネレータを最後まで消費し終えた時点（またはエラー）でsessionを閉じる。
     """
     own_session = session is None
@@ -141,18 +144,21 @@ def stream_chat(
         try:
             response = session.post(url, json=payload, stream=True, timeout=_TIMEOUT)
             raise_for_auth(response, url)
-            response.raise_for_status()
-        except AuthError as error:
-            raise _auth_error_to_chat_error(error) from error
+            raise_for_status_with_body(response, url)
+        except (AuthError, ClientRequestError) as error:
+            raise ChatError(str(error)) from error
         except requests.RequestException as error:
             raise ChatError(f"{base_url} への生成リクエストに失敗しました: {error}") from error
 
+        # [DONE] か finish_reason が来ずに終わったら、途中で切れている。
+        completed = False
         for raw_line in response.iter_lines():
             line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
             if not line.startswith("data:"):
                 continue  # 空行、コメント、event: 行
             body = line[len("data:"):].strip()
             if body == "[DONE]":
+                completed = True
                 break
             try:
                 data = json.loads(body)
@@ -165,9 +171,16 @@ def stream_chat(
             choices = data.get("choices") or []
             if not choices:
                 continue
+            if choices[0].get("finish_reason"):
+                completed = True
             content = choices[0].get("delta", {}).get("content")
             if content:
                 yield content
+        if not completed:
+            raise ChatError(
+                "生成の応答が途中で切れました（終了の合図が届く前に接続が終わりました）。"
+                "もう一度お試しください"
+            )
     finally:
         if own_session:
             session.close()

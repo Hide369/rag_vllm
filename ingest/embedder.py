@@ -12,10 +12,12 @@ import requests
 
 from ingest.vllm_config import (
     AuthError,
+    ClientRequestError,
     list_model_ids,
     load_vllm_settings,
     new_session,
     raise_for_auth,
+    raise_for_status_with_body,
 )
 
 EMBED_DIM = 1024
@@ -52,9 +54,9 @@ def _post_batch(session, texts: list[str]) -> list[list[float]]:
             response = session.post(url, json=payload, timeout=_TIMEOUT)
             # 401/403 は何度送っても通らないので、再試行の対象にしない。
             raise_for_auth(response, url)
-            response.raise_for_status()
+            raise_for_status_with_body(response, url)
             vectors = _vectors_in_input_order(response.json()["data"], len(texts))
-        except AuthError as error:
+        except (AuthError, ClientRequestError) as error:
             raise EmbeddingError(str(error)) from error
         except (requests.RequestException, KeyError, TypeError, ValueError) as error:
             last_error = error

@@ -15,10 +15,12 @@ import requests
 from ingest.image_text import DECORATION
 from ingest.vllm_config import (
     AuthError,
+    ClientRequestError,
     list_model_ids,
     load_vllm_settings,
     new_session,
     raise_for_auth,
+    raise_for_status_with_body,
 )
 
 CAPTION_PROMPT = (
@@ -78,7 +80,7 @@ def caption_image(image_bytes: bytes, session=None) -> str:
                 response = session.post(url, json=payload, timeout=_TIMEOUT)
                 # 401/403 は何度送っても通らないので、再試行の対象にしない。
                 raise_for_auth(response, url)
-                response.raise_for_status()
+                raise_for_status_with_body(response, url)
                 choice = response.json()["choices"][0]
                 content = choice["message"].get("content")
                 if content is None:
@@ -88,7 +90,7 @@ def caption_image(image_bytes: bytes, session=None) -> str:
                         f"応答に本文がありません（finish_reason={choice.get('finish_reason')}）"
                     )
                 return content.strip()
-            except AuthError as error:
+            except (AuthError, ClientRequestError) as error:
                 raise VlmError(str(error)) from error
             except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as error:
                 last_error = error

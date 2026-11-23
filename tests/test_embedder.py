@@ -14,8 +14,9 @@ from ingest.vllm_config import load_vllm_settings
 
 
 class _FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, text=""):
         self._payload = payload
+        self.text = text
         self.status_code = status
 
     def raise_for_status(self):
@@ -192,3 +193,20 @@ def test_check_embedder_reports_an_auth_rejection():
     session = _FakeSession([_FakeResponse({}, status=401)])
     with pytest.raises(EmbeddingError, match="VLLM_API_KEY"):
         check_embedder(session=session)
+
+
+def test_client_error_is_not_retried_and_shows_the_server_reason(monkeypatch):
+    monkeypatch.setattr(embedder.time, "sleep", lambda _s: pytest.fail("再試行した"))
+    session = _FakeSession([_FakeResponse({}, status=404, text="The model `x` does not exist.")])
+    with pytest.raises(EmbeddingError) as caught:
+        embed_texts(["本文"], session=session)
+    assert "404" in str(caught.value)
+    assert "The model `x` does not exist." in str(caught.value)
+    assert len(session.payloads) == 1
+
+
+def test_server_error_is_still_retried(monkeypatch):
+    monkeypatch.setattr(embedder.time, "sleep", lambda _s: None)
+    session = _FakeSession([_FakeResponse({}, status=500, text="boom"), _vectors(1)])
+    assert len(embed_texts(["本文"], session=session)) == 1
+    assert len(session.payloads) == 2

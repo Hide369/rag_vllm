@@ -11,7 +11,8 @@ JPEG = bytes([0xFF, 0xD8, 0xFF, 0xE0]) + b"rest"
 
 
 class _FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, text=""):
+        self.text = text
         self._payload = payload
         self.status_code = status
 
@@ -161,3 +162,20 @@ def test_check_vlm_reports_an_auth_rejection():
     session = _FakeSession([_FakeResponse({}, status=403)])
     with pytest.raises(VlmError, match="VLLM_API_KEY"):
         vlm.check_vlm(session=session)
+
+
+def test_client_error_is_not_retried_and_shows_the_server_reason(monkeypatch):
+    monkeypatch.setattr(vlm.time, "sleep", lambda _s: pytest.fail("再試行した"))
+    session = _FakeSession([_FakeResponse({}, status=404, text="The model `x` does not exist.")])
+    with pytest.raises(VlmError) as caught:
+        caption_image(b"x", session=session)
+    assert "404" in str(caught.value)
+    assert "The model `x` does not exist." in str(caught.value)
+    assert len(session.payloads) == 1
+
+
+def test_server_error_is_still_retried(monkeypatch):
+    monkeypatch.setattr(vlm.time, "sleep", lambda _s: None)
+    session = _FakeSession([_FakeResponse({}, status=500, text="boom"), _reply("説明")])
+    assert caption_image(b"x", session=session) == "説明"
+    assert len(session.payloads) == 2

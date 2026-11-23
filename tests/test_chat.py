@@ -9,8 +9,9 @@ from ingest.vllm_config import AuthError
 
 
 class _FakeResponse:
-    def __init__(self, payload=None, lines=None, status=200):
+    def __init__(self, payload=None, lines=None, status=200, text=""):
         self._payload = payload
+        self.text = text
         self._lines = lines or []
         self.status_code = status
 
@@ -102,7 +103,7 @@ def test_ask_text_sends_neither_response_format_nor_max_tokens():
 
 
 def test_requests_carry_no_ollama_specific_fields():
-    session = _FakeSession([_reply("a"), _reply("b"), _FakeResponse(lines=_sse(_delta(content="c")))])
+    session = _FakeSession([_reply("a"), _reply("b"), _FakeResponse(lines=_sse(_delta(content="c")) + [b"data: [DONE]"])])
     ask_json("m", "p", session=session)
     ask_text("m", "p", session=session)
     _stream(session)
@@ -198,14 +199,14 @@ def test_stream_chat_sends_temperature_and_stream_flag():
 
 def test_stream_skips_chunks_with_empty_choices():
     session = _FakeSession(
-        [_FakeResponse(lines=_sse({"choices": []}, _delta(content="a")))]
+        [_FakeResponse(lines=_sse({"choices": []}, _delta(content="a")) + [b"data: [DONE]"])]
     )
     assert _stream(session) == ["a"]
 
 
 def test_stream_skips_role_only_delta():
     session = _FakeSession(
-        [_FakeResponse(lines=_sse(_delta(role="assistant"), _delta(content="a")))]
+        [_FakeResponse(lines=_sse(_delta(role="assistant"), _delta(content="a")) + [b"data: [DONE]"])]
     )
     assert _stream(session) == ["a"]
 
@@ -213,7 +214,7 @@ def test_stream_skips_role_only_delta():
 @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
 def test_stream_never_emits_reasoning(field):
     session = _FakeSession(
-        [_FakeResponse(lines=_sse(_delta(**{field: "考え中"}), _delta(content="答え")))]
+        [_FakeResponse(lines=_sse(_delta(**{field: "考え中"}), _delta(content="答え")) + [b"data: [DONE]"])]
     )
     assert _stream(session) == ["答え"]
 
@@ -256,3 +257,44 @@ def test_stream_raises_when_the_connection_fails():
     session = _FakeSession([requests.ConnectionError("refused")])
     with pytest.raises(ChatError, match="への生成リクエストに失敗しました"):
         _stream(session)
+
+
+def test_client_error_is_not_retried_and_shows_the_server_reason(monkeypatch):
+    """404 などの4xxは再送しても直らない。vLLM の本文に原因（モデル名の取り違えなど）が
+    あるので、捨てずに出す。"""
+    monkeypatch.setattr(chat.time, "sleep", lambda _s: pytest.fail("再試行しない"))
+    body = '{"error": {"message": "The model `x` does not exist."}}'
+    session = _FakeSession([_FakeResponse(status=404, text=body)])
+    with pytest.raises(ChatError) as info:
+        ask_json("x", "p", session=session)
+    assert "404" in str(info.value)
+    assert "The model `x` does not exist." in str(info.value)
+    assert len(session.payloads) == 1
+
+
+def test_stream_client_error_shows_the_server_reason():
+    session = _FakeSession([_FakeResponse(status=404, text="model x does not exist")])
+    with pytest.raises(ChatError, match="model x does not exist"):
+        _stream(session)
+
+
+def test_server_error_is_still_retried(monkeypatch):
+    monkeypatch.setattr(chat.time, "sleep", lambda _s: None)
+    session = _FakeSession([_FakeResponse(status=500, text="boom"), _reply("ok")])
+    assert ask_text("m", "p", session=session) == "ok"
+    assert len(session.payloads) == 2
+
+
+def test_stream_cut_off_without_done_or_finish_reason_raises():
+    """[DONE] も finish_reason も無いまま終わったストリームは途中で切れている。
+    そのまま完了扱いにすると、途中までの回答が完全な回答として表示される。"""
+    session = _FakeSession([_FakeResponse(lines=_sse(_delta(content="途中まで")))])
+    gen = stream_chat("m", [], 0.3, session=session)
+    assert next(gen) == "途中まで"
+    with pytest.raises(ChatError, match="途中で切れました"):
+        next(gen)
+
+
+def test_stream_with_finish_reason_but_no_done_is_complete():
+    chunks = _sse(_delta(content="a"), {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    assert _stream(_FakeSession([_FakeResponse(lines=chunks)])) == ["a"]
