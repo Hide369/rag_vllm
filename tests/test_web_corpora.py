@@ -44,10 +44,10 @@ class Recorder:
         return collection
 
     def close_stores(self):
-        # VectorStore には close() が無い（技術的負債）。開いた接続を閉じないと
+        # 開いた接続を閉じないと
         # GC 時に sqlite3 の ResourceWarning が出て、-W error で落ちる。
         for collection in self.opened:
-            collection._connection.close()
+            collection.close()
 
     def build_index(self, collection):
         self.build_calls.append(collection)

@@ -767,3 +767,22 @@ def test_chunks_by_ids_ties_are_broken_by_occurrence_id(empty_store):
     # chunk_index の昇順に返されること
     chunk_indices = [o["chunk_index"] for o in occurrences]
     assert chunk_indices == [0, 1], f"期待: [0, 1], 実際: {chunk_indices}"
+
+
+def test_close_makes_the_store_unusable(tmp_path):
+    import sqlite3
+
+    from ingest.vector_store import open_store
+
+    store = open_store(str(tmp_path / "store.sqlite3"))
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.count()
+
+
+def test_close_twice_is_harmless(tmp_path):
+    from ingest.vector_store import open_store
+
+    store = open_store(str(tmp_path / "store.sqlite3"))
+    store.close()
+    store.close()

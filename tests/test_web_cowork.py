@@ -119,9 +119,9 @@ class Recorder:
         return collection
 
     def close_stores(self):
-        # VectorStore には close() が無い（技術的負債。test_web_corpora.py と同じ）。
+        # 開いた接続を閉じる（GC 時の ResourceWarning を避ける）。
         for collection in self.opened:
-            collection._connection.close()
+            collection.close()
 
     def services(self):
         return Services(

@@ -186,6 +186,14 @@ class VectorStore:
                 "    python -m scripts.migrate_store vector_store.sqlite3"
             )
 
+    def close(self) -> None:
+        """接続を閉じる。2回呼んでも例外にならない（sqlite3 の close が冪等）。
+
+        読み書きと同じ _lock の下で閉じ、実行中の操作の途中で接続を奪わない。
+        """
+        with self._lock:
+            self._connection.close()
+
     def count(self) -> int:
         """出現の数。入れた件数がそのまま返るという既存の意味を保つ。"""
         with self._lock:
