@@ -107,8 +107,28 @@ REGRESSION = (
     "ファインチューニングについて教えてほしい",
     "ファインチューニング",
 )
-REGRESSION_EXPECTED = "生成AI活用セミナー.pptx スライド11"
+#
+# 期待する出典は「ファインチューニングを本文で扱うスライド」の組にしてある。
+# このケースが捕まえたい失敗は、章扉・目次のような中身の無いスライドが上位を
+# 占めること（2026-09-07 の記録、docs/superpowers/specs/2026-09-06-navigation-slides-design.md）
+# であり、特定の1枚が勝つことではない。当初はスライド11だけを期待していたが、
+# 2026-09-12 にセミナー資料7本を画像の説明・OCR付きで取り込み直すと、
+# 「転移学習とファインチューニングの違い」（CNN スライド18）と「RAGとファイン
+# チューニングの違い」（RAG スライド16）の図が上位に入り、スライド11は5位に
+# 下がった（実測 2026-11-23、BM25 の上位30件にはスライド11も残る）。どちらも
+# 質問に正面から答える資料で、検索は悪くなっていない。1枚に固定し続けると、
+# 資料を足すたびに実害の無い入れ替わりで赤が出る。
+REGRESSION_EXPECTED = (
+    "生成AI活用セミナー.pptx スライド11",
+    "セミナー資料/CNN画像認識セミナー.pptx スライド18",
+    "セミナー資料/RAGセミナー.pptx スライド16",
+)
 REGRESSION_TOP_N = 3
+
+
+def regression_hit(top: list[tuple[str, float]], expected: tuple[str, ...]) -> bool:
+    """BM25 の上位（出典, スコア）に、期待する出典のどれかが入っているか。"""
+    return any(citation.startswith(expected) for citation, _ in top)
 
 # 技術ドキュメント側。docs_sources.toml の10ソース（streamlit / langchain /
 # ollama / huggingface_hub / mcp / pymupdf / csharp / go / mermaid / markdown）が
@@ -317,7 +337,7 @@ class Corpus:
     out_of_domain: tuple[str, ...]
     greetings: tuple[str, ...]
     regression: tuple[str, ...]
-    regression_expected: str
+    regression_expected: tuple[str, ...]
     ingest_command: str
     # 検索の直前に英語へ訳すか。技術ドキュメントは英語で書かれており、
     # アプリ（rag_web/answering.py）は ingest/query_translation.py を通してから search() を
@@ -368,7 +388,7 @@ DOCS = Corpus(
     # であり、それは out_of_domain の分離判定がそのまま受け持つ。中身の無い
     # 回帰ケースを置くと、通ったことに意味があるように見えてしまう。
     regression=(),
-    regression_expected="",
+    regression_expected=(),
     ingest_command=DOCS_INGEST_COMMAND,
     translate=True,
 )
@@ -777,7 +797,7 @@ def main() -> int:
 
     session = new_session()
     try:
-        # 翻訳もこのセッションで行う。認証プロキシの X-API-Key を足すのは
+        # 翻訳もこのセッションで行う。Authorization: Bearer を足すのは
         # new_session() だけで、素のクライアントは401で弾かれる。
         def ask(prompt: str) -> str:
             return chat.ask_json(args.model, prompt, session=session)
@@ -837,9 +857,7 @@ def main() -> int:
         print(f"\n=== 回帰ケース（BM25側の上位{REGRESSION_TOP_N}件）===")
         for question in corpus.regression:
             top = _lexical_top(collection, index, question, REGRESSION_TOP_N)
-            hit = any(
-                citation.startswith(corpus.regression_expected) for citation, _ in top
-            )
+            hit = regression_hit(top, corpus.regression_expected)
             regression_ok = regression_ok and hit
             print(f"  {question} — {'OK' if hit else 'NG'}")
             for rank, (citation, score) in enumerate(top, start=1):
@@ -906,7 +924,7 @@ def main() -> int:
     if not regression_ok:
         print(
             f"回帰ケースが失敗しています。BM25側の上位{REGRESSION_TOP_N}件に "
-            f"{corpus.regression_expected} が入りません。"
+            f"{' / '.join(corpus.regression_expected)} のどれも入りません。"
         )
 
     if args.with_reranker:
