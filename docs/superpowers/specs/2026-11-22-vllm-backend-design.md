@@ -273,6 +273,10 @@ Task 4 のうち GB10 の配置手順書は、この設計の実装で vLLM 前�
   `NODE_EXTRA_CA_CERTS` が要る。手順書に書く。画面（`/`）は Basic 認証、`/llm/` は vLLM の
   `--api-key`、`/mcp` は Nginx でトークンを確かめる。`/llm/` と `/` はバッファリングを切り、
   読み取りのタイムアウトを延ばす。
+  Nginx を Docker で動かすと、`rag_web` から見える接続元は `127.0.0.1` ではなくブリッジの
+  IP（例: `172.17.0.1`）になる。`RAG_WEB_FORWARDED_ALLOW_IPS` に実際のプロキシの接続元を
+  設定し、Nginx は `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` を送ること。
+  でないと全利用者がログイン試行制限の同じ枠を共有する。
 - **MCP の待ち受け**: `scripts/rag_mcp_server.py --http` の streamable-http を使う
   （すでにある）。Claude Code の `--transport http` はこれに繋がる。
 - **成果物の形**: Docker（compose）・systemd・Nginx の設定は、リポジトリの `deploy/gb10/` に

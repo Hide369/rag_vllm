@@ -821,8 +821,8 @@ function downloadButton(download) {
 function renderCoworkResult(container, result) {
   for (const message of result.errors) container.append(el("div", { className: "msg error", textContent: message }));
   if (result.warnings.length) {
-    // 黄色の枠で並べると生成のたびに画面が警告で埋まり、ダウンロードが下へ押し流される
-    // 。捨てずに畳んだ中へ普通の文で出す。
+    // 黄色の枠で並べると生成のたびに画面が警告で埋まり、ダウンロードが下へ押し流される。
+    // 捨てずに畳んだ中へ普通の文で出す。
     const details = el("details", { className: "evidence" },
       el("summary", { textContent: `補足（${result.warnings.length}件）` }));
     for (const message of result.warnings) details.append(el("p", { className: "warning-text", textContent: message }));
@@ -971,8 +971,8 @@ for (const radio of document.querySelectorAll("input[name=corpus]")) {
   radio.addEventListener("change", () => {
     if (!radio.checked || state.generating) return;
     state.corpus = radio.value;
-    // 履歴を残すと、前の検索対象向けの質問が検索語に継ぎ足されて検索ごと壊れる
-    // 。消したことは画面に出す。
+    // 履歴を残すと、前の検索対象向けの質問が検索語に継ぎ足されて検索ごと壊れる。
+    // 消したことは画面に出す。
     if (state.history.length) {
       clearChat();
       show("corpus-msg", "検索対象を切り替えたため、会話履歴をリセットしました。");

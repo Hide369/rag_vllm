@@ -327,6 +327,7 @@ README のセットアップ手順の `myvenv313` は③で `rag_env` に書き�
   `_connection` を直接閉じて凌いでいる（`tests/test_web_app.py` / `tests/test_web_corpora.py`）。
   スイート全体を `-W error` で流すと、ほかのテストが開いた接続の `ResourceWarning` で落ちる。
   → 段階③: `VectorStore.close()` を追加し、Web のテストはこれで閉じている。全スイートを `-W error` で流した結果（2026-11-23）、Web のテスト以外にまだ失敗と ResourceWarning が残る。失敗: `test_coding_agent_cli`、`test_colab_vllm_notebook`、`test_docgen_diagrams`、`test_ingest_source`、`test_parser_xlsx`、`test_vlm`。閉じていない sqlite の ResourceWarning: `test_check_retrieval`、`test_migrate_store`、`test_parsers_office`、`test_vector_store`。これらは今回の範囲外で、別途直す。
+- **mermaid の描画判定が JS だけにある**: 「囲みの定義だけ・素の定義だけを描く」規則は今 `rag_web/static/app.js` にしか無く、JS のテスト基盤が無いため自動では守られない。`ingest/answer_text.py::mermaid_definitions` はテスト済みの参照実装として残してある（画面からは呼ばれない）。両者を揃える変更では両方を直すこと。
 - **ARR の応答バッファリングとタイムアウト**（Nginx では `proxy_buffering` と `proxy_read_timeout`）: チャットは NDJSON を逐次返す。ARR の応答
   バッファリングを切らないと溜め込まれて最後にまとめて届く。生成が長いと ARR の既定の
   タイムアウトで切れるため、プロキシのタイムアウトも合わせて延ばす。

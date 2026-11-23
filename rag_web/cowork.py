@@ -246,7 +246,8 @@ def _collect_evidence(
 def _attachment_path(workspace: Path, name: str) -> Path:
     """添付を書く一時パス。
 
-    名前はブラウザーから来る。区切りや ".." を含みうるため、一時フォルダの外へ書かないよう、ファイル名でなければ拒む。
+    名前はブラウザーから来る。区切りや ".." を含みうるため、一時フォルダの外へ
+    書かないよう、ファイル名でなければ拒む。
     """
     if name != Path(name).name or name in ("", ".", ".."):
         raise ValueError("ファイル名ではありません")
