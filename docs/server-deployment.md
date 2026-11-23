@@ -307,8 +307,8 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/llm/metrics            
   ある。2026-11-23、Colab で確認）
 - [ ] `/llm/invocations` と `/llm/metrics` が 404 になる（鍵なしで通る vLLM のパスが外へ出ていない）
 - [ ] Nginx 越しでログイン試行制限が利用者ごとに数えられる
-- [ ] 画像説明（Qwen3-VL-30B-A3B、FP8）の質。Colab では 8B の確認も済んでいない
-  （実測はしていない。2026-11-23 は Colab で L4 が割り当てられず確認できなかった）
+- [ ] 画像説明（Qwen3-VL-30B-A3B、FP8）の質。Colab の 8B（`vlm+embed` の組、A100）では、
+  2026-11-23 に画像説明が返ることと、pptx の取り込みが通ることを確かめた。30B-A3B は未確認
 
 ## 関連
 
