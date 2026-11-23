@@ -36,19 +36,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# OLLAMA_HOST を ingest.embedder がインポート時に読むため、他のプロジェクト内
-# import より先に .env を読み込む（scripts/ingest_source.py と同じ理由）。
-#
-# ここが抜けていた。実測 2026-09-13: `.env` が ngrok 経由のリモートを指している
-# のに、このスクリプトだけ既定の 127.0.0.1:11434 を叩いていた。手元の Ollama には
-# `bge-m3` があるので**距離は黙って測れてしまい**、`gpt-oss:20b` が無いために
-# 翻訳だけが全問失敗した。translate_query は失敗を握って原文を返す設計なので、
-# 中止させたのは translation_worked() である。埋め込み側には同じ歯止めが無い。
-# このスクリプトは「実行時と同じ条件で測る」ためにあり、宛先が違えば前提が崩れる。
+# 接続先（VLLM_*）は呼び出し時に読むが、.env を読まないと既定の宛先へ繋がる。
+# このスクリプトは「実行時と同じ条件で測る」ためにあり、宛先が違えば前提が崩れる
+# （Ollama 版で、.env を読み忘れて別の宛先の距離が黙って測れてしまった実例がある）。
+# そのため、他のプロジェクト内 import より先に .env を読み込む。
 load_dotenv()
 
 from ingest import chat, embedder, lexical, query_translation, reranker, store
-from ingest.vllm_config import load_vllm_settings, reject_legacy_env
+from ingest.vllm_config import load_vllm_settings, new_session, reject_legacy_env
 from ingest.retrieval import (
     DOCS_RERANK_FLOOR,
     RELEVANCE_THRESHOLD,
@@ -60,10 +55,6 @@ from ingest.retrieval import (
 )
 
 DB_PATH = store.DB_PATH
-
-# 検索クエリの英訳に使うモデル。rag_web/app.py の CHAT_MODEL と揃える。実行時と
-# 違うモデルで訳すと、実行時には存在しないクエリでしきい値を決めることになる。
-DEFAULT_MODEL = "gpt-oss:20b"
 
 # 取り込んだ資料に確実に答えがある質問
 RELEVANT = (
@@ -674,7 +665,7 @@ def _floor_verdict(collection, index, corpus, args) -> int:
     しきい値と違い「境界の値」ではなく「本番と同じ呼び出しの結果」で判定する。
     """
     reranker.check_reranker()
-    session = embedder.new_session()
+    session = new_session()
     try:
 
         def ask(prompt: str) -> str:
@@ -733,8 +724,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"検索クエリの英訳に使うモデル（既定: {DEFAULT_MODEL}）",
+        default=None,
+        # 実行時（rag_web）と同じ VLLM_CHAT_MODEL を既定にする。違うモデルで訳すと、
+        # 実行時には存在しないクエリでしきい値を決めることになる。
+        help="検索クエリの英訳に使うモデル（既定: VLLM_CHAT_MODEL）",
     )
     parser.add_argument(
         "--with-reranker",
@@ -746,22 +739,25 @@ def main() -> int:
     # 古い設定が残ったまま測ると、宛先が違っていても距離は黙って測れてしまう。
     try:
         reject_legacy_env()
-        load_vllm_settings()
+        settings = load_vllm_settings()
     except ValueError as error:
         print(f"エラー: {error}", file=sys.stderr)
         return 2
+    if args.model is None:
+        args.model = settings.chat_model
 
     corpus = CORPUSES[args.corpus]
     db_path = Path(args.db) if args.db else corpus.db_path
 
-    embedder.check_ollama()
+    embedder.check_embedder()
     if args.with_reranker:
         reranker.check_reranker()
     print(f"コーパス: {corpus.name}（{db_path}）")
     # 宛先を必ず出す。埋め込みも翻訳もここへ行く。宛先が実行時と違っていても
     # 距離は黙って測れてしまい、数字だけを見ても気づけない（上の load_dotenv の
     # コメント参照）。取り込みCLIが「取り込み先」を必ず出すのと同じ理由である。
-    print(f"Ollama: {embedder.OLLAMA_HOST}")
+    print(f"vLLM 埋め込み: {settings.embed_url}（{settings.embed_model}）")
+    print(f"vLLM 生成: {settings.chat_url}（{args.model}）")
     print(f"しきい値: {corpus.threshold}")
     collection = store.open_store(str(db_path))
     indexed = collection.count()
@@ -774,10 +770,10 @@ def main() -> int:
     index = build_index(collection)
     print(f"BM25インデックス: {index.document_count}文書 / {len(index.postings)}トークン")
 
-    session = embedder.new_session()
+    session = new_session()
     try:
         # 翻訳もこのセッションで行う。認証プロキシの X-API-Key を足すのは
-        # embedder.new_session() だけで、素のクライアントは401で弾かれる。
+        # new_session() だけで、素のクライアントは401で弾かれる。
         def ask(prompt: str) -> str:
             return chat.ask_json(args.model, prompt, session=session)
 
@@ -909,7 +905,7 @@ def main() -> int:
         )
 
     if args.with_reranker:
-        session = embedder.new_session()
+        session = new_session()
         try:
 
             def ask_for_rerank(prompt: str) -> str:

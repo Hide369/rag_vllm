@@ -66,7 +66,7 @@ class Fake:
         self.chat_calls = []
         self.ingest_directory_calls = []
         self.ingest_uploads_calls = []
-        self.ollama_error: Exception | None = None
+        self.embedder_error: Exception | None = None
         self.reranker_checks = 0
         # 設定すると ingest_uploads / ingest_directory はこれが set されるまで返らない。
         self.release: threading.Event | None = None
@@ -123,9 +123,9 @@ class Fake:
     def build_index(self, collection):
         return object()
 
-    def check_ollama(self):
-        if self.ollama_error is not None:
-            raise self.ollama_error
+    def check_embedder(self):
+        if self.embedder_error is not None:
+            raise self.embedder_error
 
     def check_vlm(self):
         return None
@@ -168,7 +168,7 @@ class Fake:
             search=self.search,
             build_index=self.build_index,
             open_store=self.open_store,
-            check_ollama=self.check_ollama,
+            check_embedder=self.check_embedder,
             # テストが後から差し替えられるよう、呼び出しのたびに属性を引く。
             check_vlm=lambda: self.check_vlm(),
             caption_image=self.caption_image,
@@ -489,12 +489,12 @@ def test_ingest_reports_vlm_unavailable_as_notice(client, fake, jobs):
     assert fake.ingest_directory_calls == [(fake.source_dir, None)]
 
 
-def test_ingest_returns_503_when_ollama_down(client, fake):
-    fake.ollama_error = EmbeddingError("Ollamaに接続できません")
+def test_ingest_returns_503_when_embedder_down(client, fake):
+    fake.embedder_error = EmbeddingError("vLLM（埋め込み）に接続できません")
     _login(client)
     response = client.post("/api/ingest", headers=CSRF)
     assert response.status_code == 503
-    assert response.json()["detail"] == "Ollamaに接続できません"
+    assert response.json()["detail"] == "vLLM（埋め込み）に接続できません"
     assert fake.ingest_directory_calls == []
 
 
@@ -652,10 +652,10 @@ def test_upload_too_large_returns_413(fake, jobs):
 
 
 def test_upload_returns_503_when_ollama_down(client, fake):
-    fake.ollama_error = EmbeddingError("Ollamaに接続できません")
+    fake.embedder_error = EmbeddingError("vLLM（埋め込み）に接続できません")
     response = client.post("/api/uploads", json=_upload_body(("a.txt", b"x")), headers=CSRF)
     assert response.status_code == 503
-    assert response.json()["detail"] == "Ollamaに接続できません"
+    assert response.json()["detail"] == "vLLM（埋め込み）に接続できません"
     assert fake.ingest_uploads_calls == []
 
 

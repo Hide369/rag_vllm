@@ -84,3 +84,16 @@ def raise_for_auth(response: requests.Response, url: str) -> None:
             f"{url} が認証を拒否しました（HTTP {response.status_code}）。"
             "VLLM_API_KEY を確かめてください"
         )
+
+
+def list_model_ids(session, base_url: str) -> list[str]:
+    """サーバーが配信中のモデル名（GET /v1/models の data[].id）を返す。
+
+    疎通確認（check_embedder / check_vlm）が共有する。失敗は requests.RequestException、
+    KeyError、ValueError、AuthError のまま投げ、各クライアントが自分のエラー型へ包む。
+    """
+    url = f"{base_url}/v1/models"
+    response = session.get(url, timeout=10)
+    raise_for_auth(response, url)
+    response.raise_for_status()
+    return [model["id"] for model in response.json()["data"]]

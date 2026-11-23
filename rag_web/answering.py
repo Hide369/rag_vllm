@@ -107,7 +107,7 @@ def _answer_events(
     table = None
     hits = []
     user_content = None
-    # ベクトル検索は埋め込みAPIを呼ぶ。Ollamaが止まっていればここで
+    # ベクトル検索は埋め込みAPIを呼ぶ。埋め込みのvLLMが止まっていればここで
     # EmbeddingError になるため、生成時（下のChatError）と同じ見せ方に揃える。
     try:
         if searching_docs:
@@ -159,7 +159,7 @@ def _answer_events(
             )
             user_content = build_prompt(question, hits)
     except EmbeddingError as error:
-        # 条件抽出の失敗は伝えない。Ollamaが止まっていれば条件抽出も検索も同じ
+        # 条件抽出の失敗は伝えない。vLLMが止まっていれば条件抽出も検索も同じ
         # 理由で失敗し、「通常の検索で回答します」と告げた直後に検索が落ちるため。
         yield {"type": "error", "message": f"検索できませんでした: {error}"}
         return

@@ -232,7 +232,7 @@ def _search(query: str, n_results: int) -> str:
             rerank=_ensure_reranker(),
         )
     except EmbeddingError as error:
-        # 文言をそのまま返す。embedder は「ollama pull bge-m3 を実行して
+        # 文言をそのまま返す。embedder は「VLLM_EMBED_MODEL を確かめて
         # ください」のように、利用者が次に何をすればよいかを書いている。
         #
         # 拾うのはこの1種類だけにする。広く Exception を拾っていた版は
@@ -248,7 +248,7 @@ def _search(query: str, n_results: int) -> str:
         # 読んで確認）。
         # それでも狭めるのは、詳細が失われる代償を払ってでも、バグが正常な
         # 検索結果と見分けのつく形で届くほうが良いからである。広い except では
-        # TypeError が「0件でした」や「Ollamaが落ちています」と同じ顔をして
+        # TypeError が「0件でした」や「vLLMが落ちています」と同じ顔をして
         # エージェントに届く。
         #
         # RerankError はここへ来ない。check_reranker の失敗は _ensure_reranker

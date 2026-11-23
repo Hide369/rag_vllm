@@ -359,18 +359,18 @@ def test_an_empty_store_says_the_ingest_has_not_run(monkeypatch):
     assert "取り込みが未実行" in text
 
 
-def test_ollama_failure_is_returned_as_its_own_message(monkeypatch):
-    """Ollama 未疎通の文言をそのまま返す。
+def test_embedder_failure_is_returned_as_its_own_message(monkeypatch):
+    """埋め込みのvLLM未疎通の文言をそのまま返す。
 
     サーバは起動時に疎通確認しない。Codex がセッション開始時にサーバを起こす
-    ため、そこで失敗させると Ollama を使わない作業まで巻き添えになる
+    ため、そこで失敗させると vLLM を使わない作業まで巻き添えになる
     （設計書4.4節）。確認は最初の検索時に行う。
     """
     from ingest.embedder import EmbeddingError
     from scripts import rag_mcp_server
 
     def boom(*a, **k):
-        raise EmbeddingError("Ollamaに接続できません（http://localhost:11434）")
+        raise EmbeddingError("vLLM（埋め込み）に接続できません（http://127.0.0.1:8002）")
 
     monkeypatch.setattr(rag_mcp_server, "_open", lambda: _FakeCollection())
     monkeypatch.setattr(rag_mcp_server, "build_index", lambda collection: "索引")
@@ -378,7 +378,7 @@ def test_ollama_failure_is_returned_as_its_own_message(monkeypatch):
     monkeypatch.setattr(rag_mcp_server, "search", boom)
 
     text = rag_mcp_server.search_documents("質問")
-    assert "Ollamaに接続できません" in text
+    assert "vLLM（埋め込み）に接続できません" in text
 
 
 def test_an_unexpected_error_is_not_disguised_as_a_search_result(monkeypatch):
@@ -394,7 +394,7 @@ def test_an_unexpected_error_is_not_disguised_as_a_search_result(monkeypatch):
     「nothing from the original reaches the client」と明記している）。
     それでも外へ出すのは、詳細が失われる代償を払ってでも、バグが正常な検索結果と
     見分けのつく形で届くほうが良いからである。ここで拾うと、TypeError のような
-    バグが「0件でした」や「Ollamaが落ちています」と見分けのつかない、正常な
+    バグが「0件でした」や「vLLMが落ちています」と見分けのつかない、正常な
     検索結果の顔をしてエージェントに届く。
     """
     import pytest
@@ -439,7 +439,7 @@ def test_check_reranker_is_called_only_once_across_two_searches(monkeypatch):
 def test_a_failed_reranker_check_is_retried_on_the_next_search(monkeypatch):
     """確認が失敗したら ready にしない。次の検索でまた試す。
 
-    失敗しても ready を立てたままにすると、Ollama やモデル取得が後で直っても
+    失敗しても ready を立てたままにすると、vLLM やモデル取得が後で直っても
     リランカーが二度と有効にならない。
     """
     from scripts import rag_mcp_server

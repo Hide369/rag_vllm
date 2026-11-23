@@ -209,7 +209,7 @@ def _collect_evidence(
                     ),
                 ))
     except (EmbeddingError, ChatError) as error:
-        # 埋め込み（Ollama）も英訳（LLM）も、落ちたら伝えて止める。
+        # 埋め込み（vLLM）も英訳（LLM）も、落ちたら伝えて止める。
         raise _Stop(str(error)) from error
 
     texts = []

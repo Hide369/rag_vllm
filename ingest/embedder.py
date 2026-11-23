@@ -1,24 +1,27 @@
-"""Ollama の埋め込みAPIを叩く。
+"""vLLM の OpenAI 互換埋め込みAPI（/v1/embeddings）を叩く。
 
 接続先に localhost を使ってはならない。Windowsでは localhost が先にIPv6の ::1 に
-解決され、OllamaがIPv4でしか待ち受けていないためタイムアウト待ちが発生する。
-実測: localhost + 毎回新規接続 2,151ms / 127.0.0.1 79ms / Session再利用 77ms。
-Ollama自身の処理時間はいずれも約80msである。
+解決され、IPv4でしか待ち受けないサーバーではタイムアウト待ちが発生する。これは
+Ollama で実測した事象（localhost + 毎回新規接続 2,151ms / 127.0.0.1 79ms /
+Session再利用 77ms）だが、解決順はサーバーに依らず OS 側の挙動なので vLLM でも
+同じ理由で 127.0.0.1 を既定にしている（ingest/vllm_config.py）。
 """
-import os
 import time
 
 import requests
 
-# Ollamaがインストール直後に待ち受けるポートに合わせてある。ローカルの旧教材スクリプトは
-# 12000番をコードに直接書いているが、環境変数を読まないためここの既定値とは無関係。
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+from ingest.vllm_config import (
+    AuthError,
+    list_model_ids,
+    load_vllm_settings,
+    new_session,
+    raise_for_auth,
+)
 
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
-EMBED_MODEL = "bge-m3"
 EMBED_DIM = 1024
 
-# batch=8で1,197ms/件、batch=32で1,417ms/件。16GBのメモリでは大きなバッチが不利。
+# 仮の既定値。Ollama（16GBのメモリ）では batch=8 が batch=32 より速かったが、
+# vLLM + GB10 では前提が違う。GB10 で計測して決め直す（設計書「計測前の既定値」）。
 EMBED_BATCH_SIZE = 8
 
 _MAX_ATTEMPTS = 4  # 初回 + 3回の再試行（1秒 → 2秒 → 4秒）
@@ -29,29 +32,31 @@ class EmbeddingError(Exception):
     """埋め込みの取得に失敗した。"""
 
 
-def new_session() -> requests.Session:
-    """接続を再利用するセッションを作る。使い回すことで1リクエストあたり約2秒を節約できる。
-
-    OLLAMA_API_KEY が設定されていれば X-API-Key ヘッダーを付ける。ColabのL4 GPUに
-    立てたリバースプロキシなど、認証つきのOllamaエンドポイントに繋ぐ場合に使う。
-    """
-    session = requests.Session()
-    api_key = os.environ.get("OLLAMA_API_KEY")
-    if api_key:
-        session.headers["X-API-Key"] = api_key
-    return session
+def _vectors_in_input_order(data: list[dict], expected_count: int) -> list[list[float]]:
+    # data[] の並びは保証されない。index で並べ直さないと、本文とベクトルが
+    # ずれたまま DB に入り、検索が黙って外れる。
+    if len(data) != expected_count:
+        raise EmbeddingError(
+            f"埋め込みの件数が合いません（要求 {expected_count} 件、応答 {len(data)} 件）。"
+        )
+    return [item["embedding"] for item in sorted(data, key=lambda item: item["index"])]
 
 
 def _post_batch(session, texts: list[str]) -> list[list[float]]:
-    url = f"{OLLAMA_HOST}/api/embed"
-    payload = {"model": EMBED_MODEL, "input": texts, "keep_alive": "30m"}
+    settings = load_vllm_settings()
+    url = f"{settings.embed_url}/v1/embeddings"
+    payload = {"model": settings.embed_model, "input": texts}
     last_error = None
     for attempt in range(_MAX_ATTEMPTS):
         try:
             response = session.post(url, json=payload, timeout=_TIMEOUT)
+            # 401/403 は何度送っても通らないので、再試行の対象にしない。
+            raise_for_auth(response, url)
             response.raise_for_status()
-            vectors = response.json()["embeddings"]
-        except (requests.RequestException, KeyError, ValueError) as error:
+            vectors = _vectors_in_input_order(response.json()["data"], len(texts))
+        except AuthError as error:
+            raise EmbeddingError(str(error)) from error
+        except (requests.RequestException, KeyError, TypeError, ValueError) as error:
             last_error = error
             if attempt < _MAX_ATTEMPTS - 1:
                 time.sleep(2**attempt)
@@ -60,11 +65,11 @@ def _post_batch(session, texts: list[str]) -> list[list[float]]:
         if any(len(vector) != EMBED_DIM for vector in vectors):
             raise EmbeddingError(
                 f"埋め込みの次元が想定と違います（期待 {EMBED_DIM}）。"
-                f"モデル {EMBED_MODEL} が正しいか確認してください。"
+                f"モデル {settings.embed_model} が正しいか確認してください。"
             )
         return vectors
     raise EmbeddingError(
-        f"{OLLAMA_HOST} への埋め込みリクエストが{_MAX_ATTEMPTS}回失敗しました: {last_error}"
+        f"{settings.embed_url} への埋め込みリクエストが{_MAX_ATTEMPTS}回失敗しました: {last_error}"
     )
 
 
@@ -88,27 +93,28 @@ def embed_query(text: str, session=None) -> list[float]:
     return embed_texts([text], session=session)[0]
 
 
-def check_ollama(session=None) -> None:
+def check_embedder(session=None) -> None:
     """取り込み開始前の疎通確認。
 
     460チャンクの処理を始めてから落ちるのを防ぐため、先に一度だけ確認する。
     """
+    settings = load_vllm_settings()
     own_session = session is None
     session = session or new_session()
     try:
         try:
-            response = session.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
-            response.raise_for_status()
-            names = [model["name"] for model in response.json().get("models", [])]
-        except (requests.RequestException, KeyError, ValueError) as error:
+            served = list_model_ids(session, settings.embed_url)
+        except AuthError as error:
+            raise EmbeddingError(str(error)) from error
+        except (requests.RequestException, KeyError, TypeError, ValueError) as error:
             raise EmbeddingError(
-                f"Ollamaに接続できません（{OLLAMA_HOST}）。"
+                f"vLLM（埋め込み）に接続できません（{settings.embed_url}）。"
                 f"起動しているか確認してください: {error}"
             ) from error
-        if not any(name.split(":")[0] == EMBED_MODEL for name in names):
+        if settings.embed_model not in served:
             raise EmbeddingError(
-                f"埋め込みモデル {EMBED_MODEL} がありません。"
-                f"`ollama pull {EMBED_MODEL}` を実行してください。"
+                f"埋め込みモデル {settings.embed_model} がサーバーにありません。"
+                f"VLLM_EMBED_MODEL を確かめてください（サーバーにあるモデル: {', '.join(served) or 'なし'}）。"
             )
     finally:
         if own_session:

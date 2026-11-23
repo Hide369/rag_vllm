@@ -17,7 +17,7 @@ from scripts import check_retrieval
 
 def test_an_empty_store_stops_main_with_a_reason(monkeypatch, tmp_path, capsys):
     """件数0なら測るものが無い。何をすればよいかを告げて終了する。"""
-    monkeypatch.setattr(check_retrieval.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         sys, "argv", ["check_retrieval", "--db", str(tmp_path / "empty.sqlite3")]
     )
@@ -26,9 +26,28 @@ def test_an_empty_store_stops_main_with_a_reason(monkeypatch, tmp_path, capsys):
     assert "scripts.ingest_source" in capsys.readouterr().out
 
 
+def test_the_endpoints_and_the_default_translation_model_come_from_vllm_settings(
+    monkeypatch, tmp_path, capsys
+):
+    """既定のモデル名が Ollama 流（gpt-oss:20b）のままだと、vLLM へそのまま送って
+    404 になる。実行時と同じ VLLM_CHAT_MODEL を使い、宛先も必ず出す。"""
+    monkeypatch.setenv("VLLM_CHAT_MODEL", "my-chat")
+    monkeypatch.setenv("VLLM_EMBED_URL", "http://embed.example:9000")
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
+    monkeypatch.setattr(
+        sys, "argv", ["check_retrieval", "--db", str(tmp_path / "empty.sqlite3")]
+    )
+
+    assert check_retrieval.main() == 1
+
+    printed = capsys.readouterr().out
+    assert "http://embed.example:9000" in printed
+    assert "my-chat" in printed
+
+
 def test_an_empty_docs_store_names_the_docs_commands(monkeypatch, tmp_path, capsys):
     """技術ドキュメント側は取り込み手順が違う。社内資料の手順を案内しても進めない。"""
-    monkeypatch.setattr(check_retrieval.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         sys,
         "argv",

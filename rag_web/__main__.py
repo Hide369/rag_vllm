@@ -10,18 +10,17 @@ import sys
 import uvicorn
 from dotenv import load_dotenv
 
+from ingest.vllm_config import load_vllm_settings, reject_legacy_env
+
+from .app import create_app
+from .auth import validate_password_hash
+from .settings import load_web_settings
+
 
 def main() -> int:
-    # ingest 側の設定には import 時に環境変数を読むものが残っている（Ollama 版の名残）ため、
-    # ingest を取り込む rag_web.app などより先に .env を読み込む必要がある。
-    # そのため .settings / .auth / .app はここで遅延インポートする。
+    # 接続設定は呼ぶたびに環境変数から読む（ingest.vllm_config）ので、import の順序には
+    # 依存しない。ただし設定を読む前（create_app より前）に .env を読み込んでおく。
     load_dotenv()
-
-    from ingest.vllm_config import load_vllm_settings, reject_legacy_env
-
-    from .app import create_app
-    from .auth import validate_password_hash
-    from .settings import load_web_settings
 
     try:
         # 古い OLLAMA_* が残ったまま起動すると、利用者は設定が効いていると思い込む。

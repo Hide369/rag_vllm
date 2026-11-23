@@ -430,9 +430,9 @@ def test_diagram_failures_are_reported(recorder, services, corpora, monkeypatch)
 
 
 def test_search_error_becomes_result_error(recorder, services, corpora):
-    recorder.search_error = EmbeddingError("Ollamaに接続できません")
+    recorder.search_error = EmbeddingError("vLLM（埋め込み）に接続できません")
     result = _run(_request(), services, corpora)
-    assert result["errors"] == ["Ollamaに接続できません"]
+    assert result["errors"] == ["vLLM（埋め込み）に接続できません"]
     assert result["download"] is None
 
 

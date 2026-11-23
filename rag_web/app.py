@@ -338,10 +338,10 @@ def create_app(
         if not is_admin(request):
             raise HTTPException(401, "管理者としてログインしてください")
 
-    def require_ollama() -> None:
+    def require_embedder() -> None:
         # 取り込みを始めてから落ちるのを防ぐ。CLI と同じ確認。
         try:
-            services.check_ollama()
+            services.check_embedder()
         except EmbeddingError as e:
             raise HTTPException(503, str(e)) from e
 
@@ -430,7 +430,7 @@ def create_app(
 
     @app.post("/api/ingest", dependencies=[Depends(require_admin)])
     def ingest() -> dict:
-        require_ollama()
+        require_embedder()
         caption_image, reason = caption_image_or_reason(services)
         collection = corpora.collection(INTERNAL)
 
@@ -461,7 +461,7 @@ def create_app(
     @app.post("/api/uploads", dependencies=[Depends(require_csrf_header)])
     def upload(body: UploadBody) -> dict:
         files = _decode_uploads(body.files, settings.max_upload_bytes)
-        require_ollama()
+        require_embedder()
         caption_image, reason = caption_image_or_reason(services)
         collection = corpora.collection(INTERNAL)
 
