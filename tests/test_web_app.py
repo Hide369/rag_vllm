@@ -12,7 +12,9 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import anyio.to_thread
 from fastapi.testclient import TestClient
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import docgen
 from ingest import store, vector_store
@@ -78,6 +80,10 @@ class Fake:
         # 設定すると ask_json はこれが set されるまで返らない（生成の途中で止める）。
         self.ask_release: threading.Event | None = None
         self.ask_started = threading.Event()
+        # 雛形なしの生成（ask_text）を止める・失敗させる。Cowork の同時実行数のテスト用。
+        self.text_release: threading.Event | None = None
+        self.text_started = threading.Event()
+        self.text_error: Exception | None = None
 
     def open_store(self, path):
         collection = vector_store.open_store(path)
@@ -85,10 +91,10 @@ class Fake:
         return collection
 
     def close_stores(self):
-        # VectorStore には close() が無い（技術的負債）。開いた接続を閉じないと
+        # 開いた接続を閉じないと
         # GC 時に sqlite3 の ResourceWarning が出て、-W error で落ちる。
         for collection in self.opened:
-            collection._connection.close()
+            collection.close()
 
     def stream_chat(self, model, messages, temperature):
         self.chat_calls.append((model, messages, temperature))
@@ -103,6 +109,11 @@ class Fake:
 
     def ask_text(self, model, prompt, num_ctx=None):
         self.ask_text_calls.append((model, prompt, num_ctx))
+        self.text_started.set()
+        if self.text_release is not None:
+            assert self.text_release.wait(WAIT_S), "テストが text_release を set しなかった"
+        if self.text_error is not None:
+            raise self.text_error
         return "# 文書\n\n本文\n"
 
     def parse(self, path, caption_image=None):
@@ -190,8 +201,11 @@ def fake(tmp_path, jobs):
     fake.close_stores()
 
 
-def _client(fake, jobs, max_upload_bytes=1024, throttle=None):
-    settings = WebSettings(admin_password_hash=PASSWORD_HASH, max_upload_bytes=max_upload_bytes)
+def _client(fake, jobs, max_upload_bytes=1024, throttle=None, **settings_overrides):
+    settings = WebSettings(
+        admin_password_hash=PASSWORD_HASH, max_upload_bytes=max_upload_bytes,
+        **settings_overrides,
+    )
     app = create_app(
         settings,
         services=fake.services(),
@@ -532,6 +546,42 @@ def test_login_throttled_after_repeated_failures(fake, jobs):
         assert response.status_code == 429
         assert int(response.headers["retry-after"]) > 0
         assert client.get("/api/me").json() == {"admin": False}
+
+
+def _behind_proxy(fake, jobs, trusted_hosts):
+    """__main__ が uvicorn に任せる設定と同じ trusted_hosts で、アプリを包む。"""
+    settings = WebSettings(admin_password_hash=PASSWORD_HASH)
+    app = create_app(
+        settings, services=fake.services(), jobs=jobs, throttle=LoginThrottle(),
+        today=lambda: date(2026, 11, 22),
+    )
+    return TestClient(ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts))
+
+
+def _login_as(client, forwarded_for, password):
+    return client.post(
+        "/api/login", json={"password": password},
+        headers={**CSRF, "X-Forwarded-For": forwarded_for},
+    )
+
+
+def test_login_throttle_uses_forwarded_client_from_trusted_proxy(fake, jobs):
+    # TestClient の接続元は "testclient"。これを信頼するプロキシとして扱う。
+    with _behind_proxy(fake, jobs, "testclient") as client:
+        for _ in range(5):
+            assert _login_as(client, "10.0.0.5", "wrong").status_code == 401
+        assert _login_as(client, "10.0.0.5", PASSWORD).status_code == 429
+        # 別の利用者は、同じプロキシ経由でも巻き添えにならない。
+        assert _login_as(client, "10.0.0.6", PASSWORD).status_code == 200
+
+
+def test_forwarded_header_from_untrusted_peer_does_not_change_client(fake, jobs):
+    # 信頼しない接続元が X-Forwarded-For を偽っても、接続元は書き換わらない。
+    # 書き換わるなら、送り先を変えるだけでログインの試行回数制限を逃れられる。
+    with _behind_proxy(fake, jobs, "127.0.0.1") as client:
+        for index in range(5):
+            assert _login_as(client, f"10.0.1.{index}", "wrong").status_code == 401
+        assert _login_as(client, "10.0.1.99", PASSWORD).status_code == 429
 
 
 def test_logout_revokes_session(client, fake):
@@ -1126,3 +1176,66 @@ def test_template_register_reports_partial_failure(client, fake):
     assert detail.startswith("b.md を登録できませんでした: ")
     assert detail.endswith("（登録済み: a.md）")
     assert [item["name"] for item in client.get("/api/templates").json()["items"]] == ["a.md"]
+
+
+COWORK_BUSY_MESSAGE = "ほかの人の生成が混み合っています。少し待ってからもう一度実行してください"
+
+
+def _start_blocked_cowork(client, fake):
+    """終わらない生成を1本走らせ、生成の中に入るまで待つ。"""
+    fake.text_release = threading.Event()
+    fake.text_started.clear()
+    response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+    assert response.status_code == 200, response.text
+    assert fake.text_started.wait(WAIT_S)
+    return response.json()["job_id"]
+
+
+def test_cowork_over_the_limit_is_rejected_with_503(fake, jobs):
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        first = _start_blocked_cowork(client, fake)
+        try:
+            response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+            assert response.status_code == 503
+            assert response.json() == {"detail": COWORK_BUSY_MESSAGE}
+        finally:
+            fake.text_release.set()
+        assert _job_result(client, jobs, first)["state"] == "done"
+
+
+def test_cowork_slot_is_returned_when_the_job_finishes(fake, jobs):
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        first = _start_blocked_cowork(client, fake)
+        fake.text_release.set()
+        assert _job_result(client, jobs, first)["state"] == "done"
+        assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
+
+
+def test_cowork_slot_is_returned_when_the_job_raises(fake, jobs):
+    fake.text_error = RuntimeError("生成に失敗")
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        response = client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+        assert response.status_code == 200
+        outcome = _job_result(client, jobs, response.json()["job_id"])
+        assert outcome["state"] in ("done", "failed")
+        fake.text_error = None
+        assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
+
+
+def test_cowork_slot_is_returned_when_the_job_cannot_start(fake, jobs, monkeypatch):
+    def cannot_start(*args, **kwargs):
+        raise RuntimeError("スレッドを起動できない")
+
+    monkeypatch.setattr(jobs, "start", cannot_start)
+    with _client(fake, jobs, max_cowork_jobs=1) as client:
+        with pytest.raises(RuntimeError, match="スレッドを起動できない"):
+            client.post("/api/cowork", json=_cowork_body(), headers=CSRF)
+        monkeypatch.undo()
+        assert _cowork_result(client, jobs, _cowork_body())["errors"] == []
+
+
+def test_threadpool_size_is_applied_on_startup(fake, jobs):
+    with _client(fake, jobs, threadpool_size=7) as client:
+        # リミッターはイベントループごとにあるため、アプリが動くループの中で読む。
+        limiter = client.portal.call(anyio.to_thread.current_default_thread_limiter)
+        assert limiter.total_tokens == 7

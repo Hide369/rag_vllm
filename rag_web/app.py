@@ -16,11 +16,14 @@ import json
 import logging
 import math
 import tempfile
+import threading
+from contextlib import asynccontextmanager
 from collections.abc import Callable, Collection, Iterator
 from datetime import date
 from pathlib import Path
 from typing import Literal
 
+import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -72,6 +75,9 @@ DOCS_INGEST_COMMAND = (
 UPLOAD_CAPTION = (
     "アップロードした資料はDBに残り、全利用者の検索対象になります。"
     "不要になったら下の一覧から削除してください。"
+)
+COWORK_BUSY_MESSAGE = (
+    "ほかの人の生成が混み合っています。少し待ってからもう一度実行してください"
 )
 SHARED_BUSY_MESSAGE = "ほかの人が取り込み中です。終わってからもう一度実行してください"
 TEMPLATE_CAPTION = (
@@ -298,7 +304,18 @@ def create_app(
     sessions = SessionStore(settings.session_ttl_s)
     corpora = CorpusCache(services)
 
-    app = FastAPI(title="社内資料RAG", docs_url=None, redoc_url=None, openapi_url=None)
+    # 1本ごとに添付と生成物がメモリに載るため、同時に走る Cowork の数を絞る。
+    cowork_slots = threading.BoundedSemaphore(settings.max_cowork_jobs)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 同期ルートは anyio の既定スレッドプール（既定40）で走る。サイズはここで決める。
+        anyio.to_thread.current_default_thread_limiter().total_tokens = settings.threadpool_size
+        yield
+
+    app = FastAPI(
+        title="社内資料RAG", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     cookie_attributes = _session_cookie_attributes(settings)
 
@@ -513,18 +530,26 @@ def create_app(
         )
         generated_on = today()
 
-        # 技術的負債: 同時に走る Cowork ジョブの数に上限が無い。1本ごとに添付
-        # （最大 RAG_WEB_MAX_UPLOAD_MB）と生成物がメモリに載る
-        # （docs/superpowers/specs/2026-11-22-fastapi-web-ui-design.md「段階③への申し送り」）。
+        # 同時に走る数は RAG_WEB_MAX_COWORK_JOBS まで。待たせずに 503 で断る。
         # 共有ロックは取らない。生成は共有リソースを変えず（添付はDBに入れない）、
         # 取り込み中でも使えるようにする。生成中に雛形が消されたときは、
         # generate_cowork がエラー結果として返す。
-        return {
-            "job_id": jobs.start(
-                lambda: generate_cowork(request, services, corpora, generated_on),
-                shared=False,
-            )
-        }
+        if not cowork_slots.acquire(blocking=False):
+            raise HTTPException(503, COWORK_BUSY_MESSAGE)
+
+        def work() -> dict:
+            try:
+                return generate_cowork(request, services, corpora, generated_on)
+            finally:
+                cowork_slots.release()
+
+        try:
+            job_id = jobs.start(work, shared=False)
+        except BaseException:
+            # ジョブが始まらなければ work の finally は走らない。枠を返さないと減り続ける。
+            cowork_slots.release()
+            raise
+        return {"job_id": job_id}
 
     # --- フォーマットファイル -----------------------------------------------------------
 
