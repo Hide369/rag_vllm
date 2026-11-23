@@ -486,7 +486,7 @@ ngrokでその1ポートだけを外部公開する。プロキシはパスの�
   0.999820・平均0.999976（しきい値0.99、どちらも合格）。`scripts/check_retrieval.py docs`
   は距離の門が分離できた。`internal` は、BM25だけで引く回帰ケースが1件落ちる
   （この切り替えの前からある問題で、vLLMとは無関係）。
-  `vlm` の組（画像説明）は実測はしていない（Colabでの確認待ち）。
+  `vlm` の組（画像説明）は実測はしていない（2026-11-23 は Colab で L4 が割り当てられず確認できなかった）。
 - 設計: [docs/superpowers/specs/2026-11-22-vllm-colab-notebook-design.md](docs/superpowers/specs/2026-11-22-vllm-colab-notebook-design.md)
 
 ## GB10サーバーに配置する

@@ -326,7 +326,7 @@ gpt-oss-20b（`--max-model-len 32768`、`--gpu-memory-utilization` 0.80）と bg
   結果ではない。
 - **画面**（`run_web.ps1` を Colab の vLLM へ向けた）: 両コーパスでチャットのストリーム、
   Cowork（フォーマットなしの生成）が通った。
-- **VLM プロファイル**（Qwen3-VL-8B、割合 0.90）: 実測はしていない（Colab での確認待ち）。
+- **VLM プロファイル**（Qwen3-VL-8B、割合 0.90）: 実測はしていない（2026-11-23 は Colab で L4 が割り当てられず確認できなかった。T4 の16GBには載らない）。
 - **GB10**: 実測はしていない。メモリ配分、gpt-oss-120b の速度、Qwen3-VL-30B-A3B（FP8）の起動、
   Nginx・systemd・MCP の経路、Claude Code からの接続は、すべて GB10 が使えるようになってから確かめる
   （[配置手順](../../server-deployment.md)の「受け入れ確認の項目」）。
