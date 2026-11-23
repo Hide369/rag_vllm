@@ -10,8 +10,10 @@
 """
 from pathlib import Path
 
+from ingest import vector_store
+from ingest.embedder import EMBED_DIM
 from ingest.models import Chunk
-from ingest.vector_store import open_store  # noqa: F401  再公開
+from ingest.vllm_config import load_vllm_settings
 
 DB_FILENAME = "vector_store.sqlite3"
 # パスの単一の情報源。呼び出し側が各自で組み立てると、片方だけ間違えても
@@ -30,6 +32,85 @@ DOCS_DB_FILENAME = "docs_store.sqlite3"
 DOCS_DB_PATH = Path(__file__).resolve().parent.parent / DOCS_DB_FILENAME
 
 
+# 記録の無いDBは Ollama 時代に bge-m3・1024次元で作られたものである。
+# 記録が無いことを「何でもよい」と読むと、別モデルで入れ直した瞬間から
+# 距離だけが黙って狂う。
+LEGACY_EMBEDDING_MODEL = "bge-m3"
+LEGACY_EMBEDDING_DIM = 1024
+_MODEL_KEY = "embedding_model"
+_DIM_KEY = "embedding_dim"
+
+
+class EmbeddingMismatchError(Exception):
+    """DBのベクトルを作った埋め込みモデルと、設定のモデルが違う。"""
+
+
+def _canonical_model(name: str) -> str:
+    """モデル名を比べるための形にする。
+
+    vLLM は `BAAI/bge-m3` のように組織名つきで名乗ることがあり、設定は
+    `bge-m3` と書かれることが多い。同じモデルを別物と判定して全件の
+    入れ直しを求めないよう、組織名を落とし、大文字小文字を区別しない。
+    """
+    return name.strip().rsplit("/", 1)[-1].lower()
+
+
+def ensure_embedding_model(collection, model: str, dim: int) -> None:
+    """DBの記録と設定が同じ埋め込みモデルであることを確かめる。
+
+    読むだけの利用者（MCPサーバー、画面の検索）も通す。検索語のベクトルを
+    別のモデルで作ると、例外は出ずに距離だけが意味を失うため、開く時点で止める。
+    """
+    recorded_model = collection.get_meta(_MODEL_KEY)
+    recorded_dim = collection.get_meta(_DIM_KEY)
+    if recorded_model is None and recorded_dim is None and collection.count() == 0:
+        # 新しい空のDBには、まだ何のモデルで作ったかという事実が無い。bge-m3 と
+        # みなすと、「新しい DB に取り込み直してください」という案内どおりに
+        # 作った DB まで止めてしまう。最初の書き込みで設定のモデルを記録する。
+        return
+    # 中身があるのに記録が無いDBは、記録を持たなかった時代（bge-m3・1024次元）の
+    # ものである。
+    recorded_model = recorded_model or LEGACY_EMBEDDING_MODEL
+    recorded_dim = int(recorded_dim or LEGACY_EMBEDDING_DIM)
+    if _canonical_model(recorded_model) == _canonical_model(model) and recorded_dim == dim:
+        return
+    raise EmbeddingMismatchError(
+        f"この DB は {recorded_model}（{recorded_dim}次元）で作られています。"
+        f"設定は {model}（{dim}次元）です。"
+        "VLLM_EMBED_MODEL を DB に合わせるか、新しい DB に取り込み直してください"
+        "（ベクトルは別のモデルのものと比べられません）。"
+    )
+
+
+def record_embedding_model(collection, model: str, dim: int) -> None:
+    """最初の書き込みで、使った埋め込みモデルを記録する。2回目以降は書かない。"""
+    collection.set_meta_if_absent(_MODEL_KEY, model)
+    collection.set_meta_if_absent(_DIM_KEY, str(dim))
+
+
+def ensure_collection_matches_settings(collection):
+    """開いた DB が設定の埋め込みモデルと合うことを確かめ、同じ collection を返す。
+
+    食い違ったときは接続を閉じてから投げる（開きっぱなしで残さない）。確認の置き場所は
+    ここ1か所にする。DB を開く側（open_store、rag_web のコーパスのキャッシュ）が
+    それぞれ書くと、片方だけ直して食い違う。
+    """
+    try:
+        ensure_embedding_model(collection, load_vllm_settings().embed_model, EMBED_DIM)
+    except Exception:
+        collection.close()
+        raise
+    return collection
+
+
+def open_store(path: str):
+    """DBを開き、設定の埋め込みモデルと合うことまで確かめる。
+
+    開くのと確かめるのを分けると、確かめ忘れた入口が食い違いに気づかない。
+    """
+    return ensure_collection_matches_settings(vector_store.open_store(path))
+
+
 def stored_file_hash(collection, source: str) -> str | None:
     """登録済みならそのファイルのハッシュを返す。未登録ならNone。"""
     found = collection.get(where={"source": source}, limit=1)
@@ -43,6 +124,14 @@ def replace_source(collection, source: str, chunks: list[Chunk], embeddings) -> 
     削除と追加は vector_store.replace が1トランザクションで行う。別々に呼ぶと、
     間で落ちたときに資料が消えたまま残る。
     """
+    if chunks:
+        # 空のチャンク列は資料の削除であり、ベクトルを1本も書かない。そこで記録
+        # すると、何も入っていないDBに設定のモデル名だけが残る。
+        # 書く前に確かめるのは、読み取り側を通らない入口（取り込み）でも
+        # 別モデルのベクトルが混ざらないようにするため。
+        model = load_vllm_settings().embed_model
+        ensure_embedding_model(collection, model, EMBED_DIM)
+        record_embedding_model(collection, model, EMBED_DIM)
     collection.replace(
         source,
         ids=[chunk.id for chunk in chunks],

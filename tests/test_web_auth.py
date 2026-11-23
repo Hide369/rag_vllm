@@ -106,6 +106,17 @@ def test_password_main_rejects_short_and_mismatch(monkeypatch, capsys):
     assert "RAG_WEB_ADMIN_PASSWORD_HASH" not in capsys.readouterr().out
 
 
+def test_password_main_accepts_nine_characters_and_rejects_eight(monkeypatch, capsys):
+    """最小の長さは9文字（利用者の指定 2026-11-23）。境界の前後を固定する。"""
+    monkeypatch.setattr(password_cli, "hash_password", lambda p: hash_password(p, n=2**10))
+    _feed_passwords(monkeypatch, ["a" * 8])
+    assert password_cli.main() == 2
+    assert "9 文字以上" in capsys.readouterr().err
+    _feed_passwords(monkeypatch, ["a" * 9, "a" * 9])
+    assert password_cli.main() == 0
+    assert capsys.readouterr().out.startswith("RAG_WEB_ADMIN_PASSWORD_HASH=scrypt:")
+
+
 def test_password_main_prints_env_line(monkeypatch, capsys):
     monkeypatch.setattr(password_cli, "hash_password", lambda p: hash_password(p, n=2**10))
     _feed_passwords(monkeypatch, [PASSWORD, PASSWORD])

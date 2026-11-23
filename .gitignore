@@ -4,7 +4,7 @@ __pycache__/
 .pytest_cache/
 
 # 秘密情報を書くファイル。ルート直下の .env にはColabのL4 GPU接続用の
-# OLLAMA_HOST / OLLAMA_API_KEY を書く。パターンにスラッシュが無いため全階層に一致する。
+# VLLM_API_KEY などを書く。パターンにスラッシュが無いため全階層に一致する。
 .env
 
 # 仮想環境
@@ -29,7 +29,7 @@ docs_store.sqlite3.bak-*
 # docs_source/ は追跡する（2026-09-13 に ignore から外した）。移植先が
 # `fetch_docs` を走らせずに取り込めるようにするためである。外部通信が要るのは
 # `fetch_docs` だけなので、これを追跡するとオフラインの移植先でも
-# `ingest_source` だけで済む（触る外部は OLLAMA_HOST のみ）。
+# `ingest_source` だけで済む（触る外部は VLLM_EMBED_URL と VLLM_VLM_URL のみ）。
 #
 # 代償が2つある。
 #

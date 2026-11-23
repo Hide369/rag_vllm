@@ -1,5 +1,10 @@
 # Windows PC 上の gpt-oss と Playwright MCP の設定
 
+> **旧手順（Ollama 前提）。** このリポジトリの推論は Ollama から vLLM へ切り替えた（2026-11-23、
+> [設計書](superpowers/specs/2026-11-22-vllm-backend-design.md)）。この文書は Ollama を前提に
+> 書かれた当時の記録で、GB10 に Ollama を置かない現在の構成では、そのままは使えない。
+> 現在の手順は [GB10 への配置手順](server-deployment.md) と [Claude Code から GB10 を使う](claude-code-gb10.md)。
+
 Windows Server ではない通常の Windows PC を推論サーバーとし、別の Windows PC で Codex を使う構成を対象にする。以下では、推論サーバーを **サーバーPC**、Codex を操作する端末を **クライアントPC** と呼ぶ。
 
 ## 結論と推奨構成

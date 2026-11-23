@@ -1,5 +1,6 @@
 import threading
 
+import numpy as np
 import pytest
 
 from ingest.vector_store import WhereError, matches
@@ -786,3 +787,39 @@ def test_close_twice_is_harmless(tmp_path):
     store = open_store(str(tmp_path / "store.sqlite3"))
     store.close()
     store.close()
+
+
+def test_meta_round_trips_as_a_string_even_for_digits(empty_store):
+    """value 列は INTEGER 型で、数字だけの文字列は整数で保存される。
+    読み出しで文字列に戻らないと、"1024" と 1024 の比較が静かに外れる。"""
+    empty_store.set_meta_if_absent("embedding_dim", "1024")
+    empty_store.set_meta_if_absent("embedding_model", "bge-m3")
+    assert empty_store.get_meta("embedding_dim") == "1024"
+    assert empty_store.get_meta("embedding_model") == "bge-m3"
+    assert empty_store.get_meta("missing") is None
+
+
+def test_set_meta_if_absent_does_not_overwrite(empty_store):
+    empty_store.set_meta_if_absent("embedding_model", "bge-m3")
+    empty_store.set_meta_if_absent("embedding_model", "other")
+    assert empty_store.get_meta("embedding_model") == "bge-m3"
+
+
+def test_sample_embeddings_returns_text_and_normalised_vectors_in_a_stable_order(
+    empty_store,
+):
+    empty_store.add(
+        ids=["1", "2", "3"],
+        documents=["あ", "い", "う"],
+        metadatas=[{"source": "a.md"}] * 3,
+        embeddings=[_vector(2.0), _vector(3.0), _vector(4.0)],
+    )
+    first = empty_store.sample_embeddings(2)
+    assert len(first) == 2
+    assert [text for text, _ in first] == [text for text, _ in empty_store.sample_embeddings(2)]
+    for _, vector in first:
+        assert float(np.linalg.norm(vector)) == pytest.approx(1.0)
+
+
+def test_sample_embeddings_of_an_empty_store_is_empty(empty_store):
+    assert empty_store.sample_embeddings(10) == []

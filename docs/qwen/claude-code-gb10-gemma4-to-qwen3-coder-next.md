@@ -1,5 +1,10 @@
 # VS CodeのClaude CodeをGB10のGemma 4 31BからQwen3-Coder-Nextへ切り替える（プロキシなし）
 
+> **旧手順（Ollama 前提）。** このリポジトリの推論は Ollama から vLLM へ切り替えた（2026-11-23、
+> [設計書](../superpowers/specs/2026-11-22-vllm-backend-design.md)）。この文書は Ollama を前提に
+> 書かれた当時の記録で、GB10 に Ollama を置かない現在の構成では、そのままは使えない。
+> 現在の手順は [GB10 への配置手順](../server-deployment.md) と [Claude Code から GB10 を使う](../claude-code-gb10.md)。
+
 [VS CodeのClaude CodeをGB10のGemma 4 31Bへ切り替える](../gemma/claude-code-gb10-gemma4-31b.md)で
 使っている `gemma4:31b-256k` を、**`qwen3-coder-next:q8_0-256k`** に置き換える手順。
 推論サーバーは GB10 の Ollama のまま替えず、プロキシも立てない。

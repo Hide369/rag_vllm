@@ -10,6 +10,7 @@
 「サーバの生存期間に最大1回」まで減らせるが、ゼロにはならない（設計書5節）。
 """
 import argparse
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -19,6 +20,7 @@ from ingest import reranker, store
 from ingest.embedder import EmbeddingError
 from ingest.prompting import format_hit_caption
 from ingest.retrieval import SEARCH_RESULT_COUNT, build_index, search
+from ingest.vllm_config import load_vllm_settings, reject_legacy_env
 
 # 根拠が無いときの出口。0件でも「ヒットしたが無関係」でも、エージェントが取る
 # べき道は同じなので、文面を1か所に持って両方から使う。
@@ -229,8 +231,10 @@ def _search(query: str, n_results: int) -> str:
             n_results=n_results,
             rerank=_ensure_reranker(),
         )
-    except EmbeddingError as error:
-        # 文言をそのまま返す。embedder は「ollama pull bge-m3 を実行して
+    except (EmbeddingError, store.EmbeddingMismatchError) as error:
+        # EmbeddingMismatchError は DB と設定の埋め込みモデルの食い違い。
+        # 開く時点（_get_store）で出るので、ここで文言を返せば利用者に届く。
+        # 文言をそのまま返す。embedder は「VLLM_EMBED_MODEL を確かめて
         # ください」のように、利用者が次に何をすればよいかを書いている。
         #
         # 拾うのはこの1種類だけにする。広く Exception を拾っていた版は
@@ -246,7 +250,7 @@ def _search(query: str, n_results: int) -> str:
         # 読んで確認）。
         # それでも狭めるのは、詳細が失われる代償を払ってでも、バグが正常な
         # 検索結果と見分けのつく形で届くほうが良いからである。広い except では
-        # TypeError が「0件でした」や「Ollamaが落ちています」と同じ顔をして
+        # TypeError が「0件でした」や「vLLMが落ちています」と同じ顔をして
         # エージェントに届く。
         #
         # RerankError はここへ来ない。check_reranker の失敗は _ensure_reranker
@@ -281,6 +285,15 @@ def main(argv=None) -> None:
         "--port", type=int, default=8080, help="--http のときの待ち受けポート"
     )
     args = parser.parse_args(argv)
+
+    # stdout は stdio の MCP プロトコルが使うため、メッセージは stderr へ出す。
+    # .env はここでは読まない（Codex / Claude Code が渡した環境変数だけを見る）。
+    try:
+        reject_legacy_env()
+        load_vllm_settings()
+    except ValueError as error:
+        print(f"エラー: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
 
     if not args.http:
         mcp.run()

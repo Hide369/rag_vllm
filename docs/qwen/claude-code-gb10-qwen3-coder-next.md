@@ -1,5 +1,10 @@
 # VS CodeのClaude CodeをGB10のQwen3-Coder-Nextへ向ける（プロキシなし）
 
+> **旧手順（Ollama 前提）。** このリポジトリの推論は Ollama から vLLM へ切り替えた（2026-11-23、
+> [設計書](../superpowers/specs/2026-11-22-vllm-backend-design.md)）。この文書は Ollama を前提に
+> 書かれた当時の記録で、GB10 に Ollama を置かない現在の構成では、そのままは使えない。
+> 現在の手順は [GB10 への配置手順](../server-deployment.md) と [Claude Code から GB10 を使う](../claude-code-gb10.md)。
+
 [GB10のOllamaを Qwen3-Coder-Next（q8_0）に置き換える](ollama-gb10-qwen3-coder-next.md)で
 載せた `qwen3-coder-next:q8_0-256k` を、Codex ではなく **VS Code の Claude Code 拡張**から
 使う手順。**GB10 側には何も足さない**（変換プロキシを立てない）。クライアント側は

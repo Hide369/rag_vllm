@@ -17,7 +17,7 @@ from scripts import check_retrieval
 
 def test_an_empty_store_stops_main_with_a_reason(monkeypatch, tmp_path, capsys):
     """件数0なら測るものが無い。何をすればよいかを告げて終了する。"""
-    monkeypatch.setattr(check_retrieval.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         sys, "argv", ["check_retrieval", "--db", str(tmp_path / "empty.sqlite3")]
     )
@@ -26,9 +26,28 @@ def test_an_empty_store_stops_main_with_a_reason(monkeypatch, tmp_path, capsys):
     assert "scripts.ingest_source" in capsys.readouterr().out
 
 
+def test_the_endpoints_and_the_default_translation_model_come_from_vllm_settings(
+    monkeypatch, tmp_path, capsys
+):
+    """既定のモデル名が Ollama 流（gpt-oss:20b）のままだと、vLLM へそのまま送って
+    404 になる。実行時と同じ VLLM_CHAT_MODEL を使い、宛先も必ず出す。"""
+    monkeypatch.setenv("VLLM_CHAT_MODEL", "my-chat")
+    monkeypatch.setenv("VLLM_EMBED_URL", "http://embed.example:9000")
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
+    monkeypatch.setattr(
+        sys, "argv", ["check_retrieval", "--db", str(tmp_path / "empty.sqlite3")]
+    )
+
+    assert check_retrieval.main() == 1
+
+    printed = capsys.readouterr().out
+    assert "http://embed.example:9000" in printed
+    assert "my-chat" in printed
+
+
 def test_an_empty_docs_store_names_the_docs_commands(monkeypatch, tmp_path, capsys):
     """技術ドキュメント側は取り込み手順が違う。社内資料の手順を案内しても進めない。"""
-    monkeypatch.setattr(check_retrieval.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -180,3 +199,33 @@ def test_the_internal_corpus_never_counts_as_a_broken_translation():
     assert check_retrieval.translation_worked(
         check_retrieval.INTERNAL, lambda question: question
     )
+
+
+def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(monkeypatch, tmp_path, capsys):
+    """古い OLLAMA_* が残ったまま測ると、宛先の違う数字が黙って出てしまう。"""
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        sys, "argv", ["check_retrieval", "--db", str(tmp_path / "empty.sqlite3")]
+    )
+
+    assert check_retrieval.main() == 2
+
+    err = capsys.readouterr().err
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err
+
+
+def test_a_db_built_with_another_model_stops_main(monkeypatch, tmp_path, capsys):
+    """別のモデルで測った距離は、しきい値の根拠にならない。"""
+    from ingest import vector_store
+
+    db = tmp_path / "s.sqlite3"
+    seed = vector_store.open_store(str(db))
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["check_retrieval", "--db", str(db)])
+
+    assert check_retrieval.main() == 2
+    assert "qwen3-embedding" in capsys.readouterr().err

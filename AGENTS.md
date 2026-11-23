@@ -61,30 +61,39 @@
   人が明示的に起動したときだけ走り、常駐プロセスもスケジューラも持たない。
   オフライン環境では実行できないが、取得済みの `docs_source/` があれば
   取り込みはローカルで完結する（`scripts/ingest_source.py` が触る外部の宛先は
-  `OLLAMA_HOST` だけである）。
-- 4本目は `OLLAMA_HOST` である。既定値（`ingest/embedder.py` の
-  `DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"`）のままならこの経路は
-  マシンの外へ出ないが、README「ColabのL4 GPU」の節が示すとおり `.env` で
-  ngrok経由のリモートURLへ向けることができる。その場合、質問文・会話履歴・
-  生成に渡す検索結果のチャンク本文（`ingest/chat.py` の `ask_json` /
-  `stream_chat` が叩く `{OLLAMA_HOST}/api/chat`）と、取り込み時のドキュメント
-  自身の本文（`ingest/embedder.py` が叩く `{OLLAMA_HOST}/api/embed`）が、
-  そのつどこの経路に乗って外へ出る。これは技術ドキュメントのコーパスが
-  持ち込んだものではない。回答生成・条件抽出・埋め込みは以前から同じ経路を
-  使っており、`ingest/query_translation.py` の `translate_query()` も
-  `ask_json` を呼ぶだけで、新しい経路を増やすものではない。
+  `VLLM_EMBED_URL` と `VLLM_VLM_URL` だけである）。
+- 4本目は `VLLM_*` の3経路である。推論は役割ごとに別の vLLM（OpenAI 互換 API）が
+  受け持ち、宛先も3つに分かれる。既定値（`ingest/vllm_config.py` の
+  `127.0.0.1:8001` / `8002` / `8003`）のままなら、これらの経路はマシンの外へ出ない。
+  本番の GB10 でも、vLLM は `127.0.0.1` にだけ公開する（`deploy/gb10/compose.yaml`）
+  ので、アプリが GB10 の `127.0.0.1` を指していれば、外へは出ない。
+  一方、開発機から Colab（README「ColabのL4でvLLMを試す」）や GB10 を指すと、
+  `.env` の `VLLM_*_URL` が ngrok や LAN のURLになり、その経路に質問と資料の本文が
+  そのつど乗る。経路ごとに乗るものは次のとおり。
+  - `VLLM_CHAT_URL`（`/v1/chat/completions`）: 質問文・会話履歴・生成に渡す検索結果の
+    チャンク本文。`ingest/chat.py` の `ask_json` / `ask_text` / `stream_chat` が叩く。
+    `ingest/query_translation.py` の `translate_query()` も `ask_json` を呼ぶだけで、
+    新しい経路を増やすものではない。
+  - `VLLM_EMBED_URL`（`/v1/embeddings`）: 取り込み時のドキュメント自身の本文と、
+    検索時の質問文。`ingest/embedder.py` が叩く。
+  - `VLLM_VLM_URL`（`/v1/chat/completions`）: 取り込み時の画像（図表・スキャン画像）。
+    `ingest/vlm.py` が叩く。
+  - `VLLM_API_KEY` は上の3つに同じ `Authorization: Bearer` で送られる。
   雛形からの文書生成（`docgen/`）もこの経路を使う。新しい宛先は増えないが、
-  画面で添付したファイルの本文が `ingest/chat.py` の `ask_json` に渡り、この
-  経路へ乗る。添付はDBに入れない（`docs/superpowers/specs/2026-09-13-document-generation-design.md`）
-  が、DBに残らないことと外へ出ないことは別である。オフラインの資料を扱うときは
-  `OLLAMA_HOST` がローカルを指していることを確かめること。
+  画面で添付したファイルの本文が `ingest/chat.py` の `ask_json` に渡り、
+  `VLLM_CHAT_URL` の経路へ乗る。添付はDBに入れない
+  （`docs/superpowers/specs/2026-09-13-document-generation-design.md`）が、DBに
+  残らないことと外へ出ないことは別である。オフラインの資料を扱うときは
+  `VLLM_*_URL` がローカル（`127.0.0.1`）を指していることを確かめること。
   雛形なしの生成（`docgen/freeform.py` / `docgen/source_code.py`）も同じで、
   添付と貼り付けたテキストの本文が `ingest/chat.py` の `ask_text` に渡り、
   この経路へ乗る。
   FastAPI版の画面（`rag_web/`）も宛先を増やさない。ブラウザは CSP で同一オリジン
-  にしか通信できず、サーバーが外へ出るのは `OLLAMA_HOST` と、チャットまたは
+  にしか通信できず、サーバーが外へ出るのは `VLLM_*_URL` の3つと、チャットまたは
   Cowork（文書生成）で最初に検索するときのリランカーの確認（上の huggingface.co
   への HEAD）だけである。この確認は失敗すると次の検索でやり直すため、オフラインでは
   質問や生成のたびに繰り返す。
   オフラインで使うならリランカーのモデルを事前に取得しておくこと。
+- 旧 `OLLAMA_HOST` / `OLLAMA_API_KEY` / `OLLAMA_VLM_MODEL` が環境に残っていると、
+  入口が止まる（黙って既定の宛先へ繋がらないため）。`VLLM_*` へ移すこと。
 

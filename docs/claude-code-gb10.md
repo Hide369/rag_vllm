@@ -1,312 +1,205 @@
-# VS CodeのClaude CodeをGB10のgpt-oss:120bへ向ける
+# VS Code の Claude Code を GB10 の gpt-oss-120b と社内資料へ向ける
 
-Windows の VS Code で Claude Code を使い、推論は社内LANのGB10（DGX Spark）に置いた
-`gpt-oss:120b` に行わせる手順。**MCPは使わない。**
+社内のクライアントPC（Windows）の VS Code で Claude Code を使い、推論は社内LANの GB10 の
+vLLM に置いた `gpt-oss-120b` に行わせる。社内資料の検索（MCP の `search_documents`）も
+同じ GB10 から HTTP で引く。クラウドのモデルは使わない。
 
-> **この文書は古い前提で書かれている。** Ollama は v0.14.0（2026-01）から
-> Anthropic Messages API（`/v1/messages`）を自分で話すので、いまは変換プロキシを挟まず
-> `ANTHROPIC_BASE_URL` に Ollama を直接書ける。Qwen3-Coder-Next に置き換えた GB10 へ
-> プロキシなしで繋ぐ手順は
-> [VS CodeのClaude CodeをGB10のQwen3-Coder-Nextへ向ける](qwen/claude-code-gb10-qwen3-coder-next.md)
-> にある。以下は LiteLLM を挟んでいた当時の手順として残す。
+GB10 側の配置（vLLM・Nginx・MCP）は [server-deployment.md](server-deployment.md) にある。
+この文書は、その配置が済んだあとのクライアントの設定を扱う。
 
-## 先に読むこと
+> **実測はしていない。** GB10 はまだ使えず、この手順を通しで実行した記録は無い。Colab の
+> vLLM（gpt-oss-20b）で、`--enable-auto-tool-choice --tool-call-parser openai` の指定で
+> 起動することまでは確かめた（2026-11-23）が、Claude Code から繋いではいない。各段階に
+> 「何が出れば成功か」を書いたので、確かめながら進めること。
 
-**Claude Code は Anthropic Messages API（`/v1/messages`）しか話さない。** 当時の Ollama は
-それを出さなかったので、**変換プロキシを1つ挟んでいた**。
+## 知っておくこと
 
-そのうえで、選ぶ前に知っておくべきことが3つある。
-
-1. **Anthropicが想定・サポートする構成ではない。** 動かなくなっても公式の窓口は無い。
-   Claude Code の更新で壊れる可能性がある
-2. **Claude Code は Claude モデル前提で作られている。** プロンプト、ツール定義、
-   思考の扱いがそれに合わせてある。別のモデルを繋ぐと、道具呼び出しの取りこぼしや
-   噛み合わない応答が出やすい。DGX Spark上でエージェント用途を比べた外部の
-   ベンチマークでは、**gpt-oss:120b がツール呼び出しで不正なJSONを出して失敗した**
-   という報告がある
-3. **同じ目的なら Codex + gpt-oss のほうが確実である。**
-   [GB10のOllamaでコーディングエージェントを動かす](gb10-coding-agent.md) の経路は、
-   このリポジトリで実際に使ってきたもので、モデルとの噛み合わせも確認済みの形になって
-   いる。**Claude Code を選ぶ理由が「使い慣れているから」だけなら、そちらを勧める。**
-
-> **未検証である。** 手元にGB10が無いため、この手順を通しで実行した記録は無い。
-> 各段階に「何が出れば成功か」を書いたので、そこで確かめながら進めること。
+1. **Anthropic のサポート対象外の構成である。** Claude Code を Anthropic 以外のモデルへ向ける
+   使い方は公式に想定されておらず、動かなくなっても窓口は無い。Claude Code の更新で壊れる
+   可能性がある。
+2. **gpt-oss-120b は Claude Code の道具呼び出しで失敗した報告がある。** Claude Code は
+   Claude 前提で作られており、DGX Spark 上でエージェント用途を比べた外部のベンチマークでは、
+   gpt-oss-120b が道具呼び出しで不正な JSON を出して失敗したという報告がある。ファイルを読まずに
+   一般論で答える、道具の引数が壊れる、といった形で現れる。設定では直らない。
+3. **RAG と 120b を共有する。** 画面（rag_web）の回答生成も同じ vLLM の `gpt-oss-120b` を使う。
+   混んでいると互いに遅くなる。Claude Code は1回の要求が大きい（指示文だけで数万トークン）。
 
 ## 構成
 
 ```text
 Windows（VS Code + Claude Code 拡張）
-        │ Anthropic Messages API（/v1/messages）
-        ▼
-GB10:4000  LiteLLM        ← ここで Anthropic形式 ⇄ Ollama形式 を変換する
-        │ OpenAI形式
-        ▼
-GB10:11434 Ollama → gpt-oss:120b
+ ├ モデル ─ HTTPS 443 /llm/ ─▶ Nginx ─▶ 生成の vLLM（127.0.0.1:8001）  /v1/messages
+ └ MCP    ─ HTTPS 443 /mcp  ─▶ Nginx ─▶ rag_mcp_server（127.0.0.1:8080）
 ```
 
-プロキシはGB10の上で動かす。Windows側に増やすものは無い。
+vLLM は Anthropic Messages API（`/v1/messages`）を自分で話すので、変換プロキシ（LiteLLM など）は
+挟まない。認証は、モデルが vLLM の `--api-key`（`Authorization: Bearer`）、MCP が Nginx の
+トークン確認である。Claude Code は Basic 認証のヘッダーを送れないため、`/llm/` には
+Basic 認証を重ねない。`--api-key` が守るのは `/v1` 系のパスだけなので、Nginx は `/llm/v1/` だけを
+vLLM へ通し、それ以外（`/llm/invocations`、`/llm/metrics` など）は 404 にする。
+ベース URL `https://<GB10>/llm` に Claude Code が `/v1/messages` を足すと `/llm/v1/messages` になり、
+この経路に合う。
 
-## 目次
+## 1. GB10 側で確かめる
 
-- [1. GB10側: Ollamaを用意する](#1-gb10側-ollamaを用意する)
-- [2. GB10側: LiteLLMを立てる](#2-gb10側-litellmを立てる)
-- [3. GB10側: 変換が効いているか確かめる](#3-gb10側-変換が効いているか確かめる)
-- [4. Windows側: Claude Codeを入れる](#4-windows側-claude-codeを入れる)
-- [5. Windows側: 接続先を設定する](#5-windows側-接続先を設定する)
-- [6. 動かして確かめる](#6-動かして確かめる)
-- [MCPについて](#mcpについて)
-- [うまくいかないとき](#うまくいかないとき)
-
-## 1. GB10側: Ollamaを用意する
-
-[GB10のOllamaでコーディングエージェントを動かす](gb10-coding-agent.md) の1節と同じ。
+Claude Code を入れる前に、サーバー側だけで確かめる。ここが通らなければ、クライアントを
+いくら設定しても動かない。
 
 ```bash
-ollama pull gpt-oss:120b
-ollama ps            # PROCESSOR 列が 100% GPU であること
-```
-
-**`100% CPU` なら、以降の手順は全部意味を失う。** 先にそれを解決する。
-
-LiteLLMは同じGB10の上で動かすので、**Ollamaを `0.0.0.0` へ広げる必要は無い**。
-`127.0.0.1:11434` のままでよい。外へ開くのはLiteLLMの4000番だけにする。
-
-コンテキスト長を伸ばすなら、Ollama側に焼く。
-
-```bash
-cat <<'EOF' > /tmp/Modelfile
-FROM gpt-oss:120b
-PARAMETER num_ctx 131072
-EOF
-ollama create gpt-oss:120b-131k -f /tmp/Modelfile
-ollama run gpt-oss:120b-131k "hi" && ollama ps   # 全層がGPUに載っているか
-```
-
-載りきらなければ `num_ctx` を 65536 に下げる。**Claude Code側から `num_ctx` は
-指定できない**ので、ここで決まった値がそのまま上限になる。
-
-**この方法は元の `gpt-oss:120b` を書き換えない。** `gpt-oss:120b-131k` という別の
-名前で作るので、やめるときは `ollama rm gpt-oss:120b-131k` で消せばよい。
-[Codex側の手順](gb10-coding-agent.md#2-gb10側-コンテキスト長を伸ばす)も同じやり方を
-とるので、モデルは共有できる。起動補助の `--configure-context` を使う場合だけ、
-同じ名前で作り直すため後始末が要る（[Ollama版Codexの「元に戻す」](gb10-coding-agent.md#元に戻す)）。
-
-## 2. GB10側: LiteLLMを立てる
-
-```bash
-python3 -m venv ~/litellm && ~/litellm/bin/pip install 'litellm[proxy]'
-```
-
-`~/litellm/config.yaml`:
-
-```yaml
-model_list:
-  # Claude Code から見えるモデル名（左）と、Ollamaの実体（右）
-  - model_name: gpt-oss-120b
-    litellm_params:
-      model: ollama_chat/gpt-oss:120b-131k
-      api_base: http://127.0.0.1:11434
-
-litellm_settings:
-  # Claude Code が送るが Ollama が解さないパラメータを落とす。
-  # これが無いと、未知のキーで弾かれる要求が出る。
-  drop_params: true
-
-general_settings:
-  # Claude Code の ANTHROPIC_AUTH_TOKEN にこの値を入れる。
-  # LAN内でもプロキシは認証を持たせる。Ollamaと違い、ここは設定できる。
-  master_key: sk-<十分に長いランダム文字列>
-```
-
-```bash
-~/litellm/bin/litellm --config ~/litellm/config.yaml --host 0.0.0.0 --port 4000
-```
-
-常時稼働させるなら systemd に載せる（[Batch_Exec の vllm-gb10.md の3節](https://github.com/Hide369/Batch_Exec/blob/main/docs/other/vllm/vllm-gb10.md#3-常時稼働させるsystemd)
-と同じ形で、`ExecStart` を上のコマンドに置き換える）。
-
-> **`master_key` は必ず設定する。** LiteLLMを `0.0.0.0` に開いた時点で、LANから
-> 届く全員がGB10のモデルを使える。Ollamaと違ってここは認証を掛けられるのだから、
-> 掛ける。
-
-## 3. GB10側: 変換が効いているか確かめる
-
-**Claude Codeを入れる前に、プロキシ単体で確かめる。** ここが通らなければ、
-Claude Code側をいくら設定しても動かない。
-
-```bash
-curl http://127.0.0.1:4000/v1/messages \
-  -H "x-api-key: sk-<master_key>" \
+KEY=<vLLM の --api-key と同じ値>
+curl -sk https://<GB10>/llm/v1/messages \
+  -H "Authorization: Bearer $KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
-  -d '{
-    "model": "gpt-oss-120b",
-    "max_tokens": 128,
-    "messages": [{"role": "user", "content": "12*17"}]
-  }'
+  -d '{"model":"gpt-oss-120b","max_tokens":256,"messages":[{"role":"user","content":"12*17"}]}'
 ```
 
-Anthropic形式の応答（`{"content":[{"type":"text","text":"204"...}]}` の形）が返ること。
+Anthropic 形式の応答（`"content":[{"type":"text"...` の形）が返ること。思考は別のブロックで返りうる。
+`max_tokens` が小さいと思考だけで使い切って本文が空になるので、`256` で空なら増やす。
 
-**道具呼び出しも試す。** Claude Code の動作はここに懸かっている。
+道具呼び出しも試す。Claude Code の動作はここに懸かっている。
 
 ```bash
-curl http://127.0.0.1:4000/v1/messages \
-  -H "x-api-key: sk-<master_key>" \
+curl -sk https://<GB10>/llm/v1/messages \
+  -H "Authorization: Bearer $KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
-  -d '{
-    "model": "gpt-oss-120b",
-    "max_tokens": 256,
-    "tools": [{
-      "name": "read_file",
-      "description": "Read a file from the workspace.",
-      "input_schema": {
-        "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"]
-      }
-    }],
-    "messages": [{"role": "user", "content": "README.md の中身を見てほしい"}]
-  }'
+  -d '{"model":"gpt-oss-120b","max_tokens":1024,"tools":[{"name":"read_file","description":"Read a file from the workspace.","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"messages":[{"role":"user","content":"README.md の中身を見てほしい"}]}'
 ```
 
-`"type": "tool_use"` を含むブロックが返れば、道具が使える。**返らない、あるいは
-`input` が壊れたJSONなら、そこがこの構成の限界である。** 上の「先に読むこと」で
-挙げた2番目の懸念が現実になった状態で、設定では直せない。
+`"type":"tool_use"` を含むブロックが返れば道具が使える。返らない、あるいは `input` が壊れた
+JSON なら、そこがこの構成の限界である（上の「知っておくこと」の2）。
 
-Windows側からも届くか確かめる。
+## 2. クライアント: Claude Code を入れる
 
-```powershell
-curl.exe http://<GB10のIP>:4000/health
-```
-
-## 4. Windows側: Claude Codeを入れる
-
-**この経路に Python は要らない。** 設定は `settings.json` に書くだけで、この
-リポジトリも起動補助（`scripts/coding_agent.py`）も使わない。要るのは
-**Node.js / npm** と VS Code である。Codex 側も設定を手で置けばPythonは要らない
-（[GB10のOllamaでコーディングエージェントを動かす](gb10-coding-agent.md#windows側に要るもの)）。
-
-VS Code の拡張機能から **Claude Code** を入れる。拡張は内部で Claude Code CLI を
-起動するので、CLIも入れておく。
+この経路に Python は要らない。要るのは Node.js / npm と VS Code である。
 
 ```powershell
 npm install -g @anthropic-ai/claude-code
 claude --version
 ```
 
-**この時点ではまだAnthropicにログインしない。** 次の設定を入れてから起動する。
+VS Code の拡張機能の Claude Code も入れる。**この時点ではまだ Anthropic にログインしない。**
+次の設定を入れてから起動する。
 
-## 5. Windows側: 接続先を設定する
+## 3. クライアント: 接続先を設定する
 
-`%USERPROFILE%\.claude\settings.json` に `env` ブロックを置く。
+`%USERPROFILE%\.claude\settings.json` の `env` に置く（値は例）。
 
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://192.168.1.50:4000",
-    "ANTHROPIC_AUTH_TOKEN": "sk-<master_key>",
+    "ANTHROPIC_BASE_URL": "https://<GB10のホスト名>/llm",
+    "ANTHROPIC_AUTH_TOKEN": "<vLLM の --api-key と同じ値>",
     "ANTHROPIC_MODEL": "gpt-oss-120b",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-oss-120b",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-oss-120b",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-oss-120b",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-oss-120b",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-oss-120b",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "DISABLE_TELEMETRY": "1"
   }
 }
 ```
 
-|キー|なぜ要るか|
+| キー | なぜ要るか |
 |---|---|
-|`ANTHROPIC_BASE_URL`|**末尾に `/v1` を付けない。** Claude Code側が `/v1/messages` を足す|
-|`ANTHROPIC_AUTH_TOKEN`|`Authorization: Bearer <値>` として送られる。LiteLLMの `master_key` と一致させる|
-|`ANTHROPIC_MODEL`|既定で使うモデル。`config.yaml` の `model_name` と一致させる|
-|`ANTHROPIC_DEFAULT_HAIKU_MODEL`|**これを忘れない。** `haiku` は裏で走る処理（要約など）に使われる。潰さないと存在しないモデル名がプロキシへ飛ぶ|
-|`ANTHROPIC_DEFAULT_SONNET_MODEL` / `_OPUS_MODEL`|`/model` で切り替えたときの行き先。潰しておかないと、切り替えた瞬間に落ちる|
-|`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`|本筋以外の外部通信を止める。社内で閉じる構成では付けておく|
-|`DISABLE_TELEMETRY`|同上|
+| `ANTHROPIC_BASE_URL` | 末尾に `/v1` を付けない。Claude Code が `/v1/messages` を足す。`/llm` が Nginx の経路 |
+| `ANTHROPIC_AUTH_TOKEN` | `Authorization: Bearer <値>` で送られる。vLLM の `--api-key`（`/etc/rag/vllm.env` の `VLLM_API_KEY`）と一致させる |
+| `ANTHROPIC_MODEL` | 既定のモデル。`--served-model-name` と一致させる |
+| `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` | `/model` の枠ごとの行き先。`haiku` は裏の処理（要約など）に使われる。潰さないと存在しないモデル名が飛ぶ |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` | 本筋以外の外部通信を止める。社内で閉じる構成では付ける |
 
-**`ANTHROPIC_API_KEY` は設定しない。** 設定するとサブスクリプションより優先され、
-どちらの認証が効いているのか分からなくなる。`ANTHROPIC_AUTH_TOKEN` だけにする。
+- **`ANTHROPIC_API_KEY` は設定しない。** `ANTHROPIC_AUTH_TOKEN` より優先され、どちらの認証が
+  効いているか分からなくなる。
+- モデル名に `claude-opus` などの別名は付けない（`--served-model-name` は `gpt-oss-120b` の1つ）。
+  上の `ANTHROPIC_DEFAULT_*_MODEL` で枠に割り当てれば、別名なしでドロップダウンに出る。
+- JSON は厳密である。`//` のコメントも末尾のカンマも構文エラーになり、起動時に
+  Settings Error が出る。
+- プロジェクトごとに分けるなら `.claude/settings.local.json` に書く。**トークンを書くので、
+  共有される `.claude/settings.json` には書かないこと。**
+- 設定したら VS Code を完全に再起動する（起動済みのウィンドウには反映されない）。
 
-JSONは厳密である。**`//` のコメントも末尾のカンマも構文エラー**になり、
-Claude Code は起動時に Settings Error として報告する。
+### 証明書が内部CAのとき
 
-プロジェクトごとに分けたいなら `.claude/settings.local.json` に書く。ユーザー設定
-より優先される。**`master_key` を書くので、共有される `.claude/settings.json` には
-書かないこと。**
-
-設定したら **VS Code を再起動する。** 起動済みのウィンドウには反映されない。
-
-## 6. 動かして確かめる
-
-VS Code で Claude Code を開き、何か聞く。
-
-```
-このリポジトリの ingest/backend.py が何をしているか、ファイルを読んで説明して
-```
-
-見るのは2つ。
-
-- **応答が返ること** — 返らなければ3節のcurlに戻る。プロキシまでは切り分け済みなので、
-  差は認証かモデル名である
-- **ファイルを実際に読みに行くこと** — 読まずに一般論を答えるなら、道具呼び出しが
-  効いていない。3節の2つ目のcurlで `tool_use` が返っていたかを確かめる
-
-GB10側でどのモデルが動いているかも見ておく。
-
-```bash
-ollama ps        # gpt-oss:120b-131k が 100% GPU で載っていること
-```
-
-### 裏で走る処理を軽いモデルへ逃がす
-
-`haiku` の行き先を120bにすると、要約のような軽い処理にも120bが使われる。GB10の
-帯域を食うので、小さいモデルへ分けたほうがよい。
-
-```yaml
-# config.yaml に足す
-  - model_name: gpt-oss-20b
-    litellm_params:
-      model: ollama_chat/gpt-oss:20b
-      api_base: http://127.0.0.1:11434
-```
+Nginx の証明書を社内の認証局（内部CA）で発行している場合、Claude Code は Node.js で動くため、
+Windows の証明書ストアではなく、CA の証明書ファイルを環境変数で渡す必要がある。
 
 ```json
-"ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-oss-20b"
+"NODE_EXTRA_CA_CERTS": "C:\\certs\\internal-ca.pem"
 ```
 
-**2つのモデルが同時にメモリへ載る。** 120b（約60GiB）と20b（約12GiB）で、
-128GBには収まる見込みだが、`ollama ps` で実際の配置を確かめること。
+これも `settings.json` の `env` に足してよい。証明書の検証エラー
+（`unable to verify the first certificate`、`UNABLE_TO_GET_ISSUER_CERT_LOCALLY` など）が出るなら
+これが無い。`NODE_TLS_REJECT_UNAUTHORIZED=0` で検証を切ることはしない。
 
-## MCPについて
+## 4. クライアント: 社内資料の MCP を登録する
 
-**この構成では MCP tool search が既定で無効になる。** Claude Code は
-`ANTHROPIC_BASE_URL` が Anthropic 以外を指しているとき、これを自分で切る。
-`tool_reference` ブロックを転送できないプロキシがあるためで、今回は MCP を使わない
-のだから、むしろ都合がよい。
+```powershell
+claude mcp add --transport http --scope user local_docs https://<GB10のホスト名>/mcp `
+  --header "Authorization: Bearer <MCP のトークン>"
+claude mcp list        # local_docs が Connected であること
+```
 
-MCPサーバーを足したくなった場合も、この既定のままで普通のMCPは使える（無効になるのは
-「tool search」という、道具が多いときに検索で絞る仕組みだけである）。ただし
-**道具の定義が増えるほど、道具呼び出しの成否はモデルの出来に懸かる。** 3節の2つ目の
-curlで結果が怪しかったなら、MCPを足す前にそこを直すこと。
+`<MCP のトークン>` は Nginx の `/etc/nginx/rag/mcp-token.conf` に書いた値で、vLLM のキーとは
+別のものである。末尾の `/mcp` を省かないこと（省くと 404）。**この登録のコマンドや
+`~/.claude.json` にトークンが残る**ので、共有しないこと。
+
+`search_documents` を呼ばせる指示は、`%USERPROFILE%\.claude\CLAUDE.md` に書く（接続先だけでは
+どの質問で検索するかは決まらない）。書き方は [claude-code-vscode.md](claude-code-vscode.md)
+と [mcp-server-network.md](mcp-server-network.md) にある。接続できているのに
+`search_documents` が呼ばれないときは [mcp-tool-not-called.md](mcp-tool-not-called.md)。
+
+## 5. 動かして確かめる
+
+VS Code で Claude Code を開き、次を聞く。
+
+```text
+このリポジトリの README.md を読んで、何をするプロジェクトか説明して
+```
+
+- **応答が返ること** — 返らなければ1節の curl に戻る。差は認証かモデル名である。
+- **ファイルを実際に読みに行くこと** — 読まずに一般論を答えるなら、道具呼び出しが効いていない。
+- **社内資料の質問で `search_documents` が呼ばれ、出典つきで返ること。**
+
+### 確認項目（未確認のもの）
+
+- [ ] **VS Code 拡張が `settings.json` の `env` を、CLI と同じように読むか。** 設計時点で
+      未確認。読まない場合は、Windows のユーザー環境変数に同じ値を置いて VS Code を完全に
+      再起動する（[claude-code-vscode.md](claude-code-vscode.md) に拡張まわりの注意がある）。
+- [ ] 道具呼び出しが、ファイル読み・編集・コマンド実行で通る
+- [ ] 長い文脈（数万トークン）で、`--max-model-len 65536` の範囲で動く
+- [ ] RAG の画面を同時に使っても、実用的な速度で返る
+
+## MCP tool search について
+
+Claude Code は `ANTHROPIC_BASE_URL` が Anthropic 以外を指しているとき、MCP の tool search
+（道具が多いときに検索で絞る仕組み）を既定で切る。`local_docs` のような普通の MCP は
+そのまま使える。ただし道具の定義が増えるほど、道具呼び出しの成否はモデルの出来に懸かる。
 
 ## うまくいかないとき
 
-|症状|原因|対処|
+| 症状 | 原因 | 対処 |
 |---|---|---|
-|401 / 403|`ANTHROPIC_AUTH_TOKEN` と `master_key` の不一致|両方を見比べる。`Bearer ` は自動で付くので値に含めない|
-|404 `/v1/v1/messages`|`ANTHROPIC_BASE_URL` に `/v1` を付けた|ホストとポートまでにする|
-|モデルが見つからない|`ANTHROPIC_MODEL` と `config.yaml` の `model_name` の不一致|左側（`model_name`）を書く。`ollama_chat/...` の右側ではない|
-|普段は動くが、たまに落ちる|`haiku` の行き先が未設定|`ANTHROPIC_DEFAULT_HAIKU_MODEL` を設定する|
-|ファイルを読まずに答える|道具呼び出しが効いていない|3節の2つ目のcurlで切り分ける。**設定では直らない**|
-|応答が途中で切れる|Ollama側の `num_ctx` 不足|1節でコンテキストを焼き直す。Claude Code側からは指定できない|
-|設定が効かない|VS Codeを再起動していない、またはJSONの構文エラー|再起動する。Settings Error が出ていないか見る|
-|Anthropicへログインを求められる|`settings.json` の場所か綴りが違う|`%USERPROFILE%\\.claude\\settings.json` であること|
+| 401 / 403 | `ANTHROPIC_AUTH_TOKEN` と `--api-key` の不一致 | 見比べる。`Bearer ` は自動で付くので値に含めない |
+| 404 `/v1/v1/messages` | `ANTHROPIC_BASE_URL` に `/v1` を付けた | `https://<GB10>/llm` までにする |
+| モデルが見つからない | `ANTHROPIC_MODEL` と `--served-model-name` の不一致 | `gpt-oss-120b` に合わせる |
+| 証明書のエラー | 内部CAをクライアントが知らない | `NODE_EXTRA_CA_CERTS` を設定する |
+| 普段は動くが、たまに落ちる | `haiku` の行き先が未設定 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` を設定する |
+| ファイルを読まずに答える | 道具呼び出しが効いていない | 1節の2つ目の curl で切り分ける。設定では直らない |
+| 応答が途中で切れる／空 | 思考で出力の上限を使い切った | 出力の上限や `--max-model-len` を見直す |
+| 設定が効かない | VS Code を再起動していない、JSON の構文エラー、拡張が env を読まない | 完全に再起動。Settings Error を見る。確認項目の1つ目 |
+| Anthropic へのログインを求められる | `settings.json` の場所か綴りが違う | `%USERPROFILE%\.claude\settings.json` であること |
+
+## 旧手順（LiteLLM + Ollama）
+
+以前は、Ollama の `gpt-oss:120b` の手前に LiteLLM を置いて Anthropic 形式を変換していた。
+GB10 は vLLM に替わり、vLLM が `/v1/messages` を直接話すため、この手順は使わない。
+当時の手順は Git の履歴（このファイルの2026-11-23より前の版）にある。Ollama へ直接繋ぐ
+手順（Qwen3-Coder-Next）は [qwen/claude-code-gb10-qwen3-coder-next.md](qwen/claude-code-gb10-qwen3-coder-next.md)
+にあるが、これも旧手順で、GB10 に Ollama を置かない現在の構成では使えない。
 
 ## 関連
 
-- [GB10のOllamaでコーディングエージェントを動かす](gb10-coding-agent.md) — Codex経路。**同じ目的なら、まずこちらを試すこと**
+- [GB10 への配置手順](server-deployment.md)
+- [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md)
 - [Claude Code 環境変数リファレンス](https://code.claude.com/docs/en/env-vars)
-- [LiteLLM `/v1/messages`](https://docs.litellm.ai/docs/anthropic_unified/)

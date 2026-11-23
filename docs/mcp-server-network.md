@@ -1,164 +1,106 @@
-# 社内資料の MCP サーバを1台に集約する（Windows / 非Server）
+# 社内資料の MCP サーバを1台に集約する（GB10）
 
-資料・ベクトルDB・Ollama・MCP サーバを1台の Windows PC に置き、開発者は自分の
-PC の Codex から HTTP で引く構成の手順である。Windows Server ではなく、通常の
-Windows（10 / 11）を想定する。
+資料・ベクトルDB・埋め込みの vLLM・MCP サーバを GB10（社内LAN）1台に置き、開発者は自分の
+PC の Claude Code（または Codex）から HTTP で引く構成である。GB10 上の配置（systemd・
+Nginx・vLLM）は [server-deployment.md](server-deployment.md) と `deploy/gb10/` にあり、
+本書は MCP の経路と、クライアントの設定を扱う。
 
-1台のPCで完結させる構成は [mcp-server.md](mcp-server.md) にある。そちらは Codex
-がサーバを子プロセスとして起動する形（stdio）で、本書の構成とは起動方法も
-`config.toml` の書き方も異なる。
+> **実測はしていない。** この構成を GB10 の実機で動かしたことはない（GB10 はまだ使えない）。
+> 下の「制限」の速度は、以前の Windows PC + Ollama の構成での実測である。
+
+1台のPCで完結させる構成は [mcp-server.md](mcp-server.md) にある。そちらは MCP サーバを
+子プロセスとして起動する形（stdio）で、本書の構成とは起動方法もクライアントの書き方も
+異なる。
 
 ## 構成
 
 ```text
-開発者PC (Codex)  ─┐
-開発者PC (Codex)  ─┼─ HTTP :8080/mcp ─▶ サーバPC（Windows 10 / 11）
-開発者PC (Codex)  ─┘                      ├ rag_mcp_server（常駐）
-                                          ├ vector_store.sqlite3
-                                          ├ source/（資料の原本）
-                                          └ Ollama :11434
+開発者PC (Claude Code) ─┐
+開発者PC (Claude Code) ─┼─ HTTPS 443 /mcp ─▶ GB10  Nginx（トークン確認）
+開発者PC (Claude Code) ─┘                      └▶ rag_mcp_server（127.0.0.1:8080、systemd）
+                                                   ├ vector_store.sqlite3
+                                                   ├ source/（資料の原本）
+                                                   └ 埋め込みの vLLM（127.0.0.1:8002）
 ```
 
-クライアント側に要るのは `config.toml` の1行と `~/.codex/AGENTS.md` への数行だけ
-である。Python も Ollama も資料も要らない。埋め込み計算もリランクもサーバ機で
-行う。
+クライアント側に要るのは `claude mcp add` の1回と、`CLAUDE.md`（または Codex の
+`AGENTS.md`）への数行だけである。Python も vLLM も資料も要らない。埋め込み計算も
+リランクもサーバ機で行う。この MCP サーバが呼ぶ vLLM は埋め込み（`VLLM_EMBED_URL`）だけで、
+生成モデルは使わない。
 
 ## 何が守られ、何が守られないか
 
-**先に読むこと。** この構成は社内資料の全文を、ポートに到達できる相手へ返す。
+**先に読むこと。** この構成は社内資料の全文を、認証を通った相手へ返す。
 
 | | 状態 |
 | --- | --- |
-| 認証 | **無い。** 誰が繋いだかをサーバは区別しない |
-| 通信の暗号化 | **無い。** 平文 HTTP である |
-| ホスト名の検証 | **効いていない。** MCP SDK の DNS リバインディング保護は既定で有効だが、`allowed_hosts` が空のこの構成では機能しない。任意の `Host` ヘッダで 200 が返ることを実測で確認した（2026-09-08、`Host: 192.168.1.50:8765` で `initialize` が成功） |
-| アクセス制限 | **ファイアウォールだけ。** 下の手順で送信元サブネットを絞る |
+| 認証 | **Nginx で Bearer トークンを確かめる**（`/etc/nginx/rag/mcp-token.conf`、リポジトリの外）。トークンを持つ人はみな同じ権限で、誰が繋いだかはサーバは区別しない |
+| 通信の暗号化 | **Nginx の TLS（HTTPS 443）。** 証明書は内部CAなら、クライアントに `NODE_EXTRA_CA_CERTS` が要る（[claude-code-gb10.md](claude-code-gb10.md)） |
+| ホスト名の検証 | MCP SDK の DNS リバインディング保護は、`allowed_hosts` が空の構成では機能しない。任意の `Host` ヘッダで 200 が返ることを実測で確認した（2026-09-08、Windows 版の構成）。GB10 では MCP サーバを `127.0.0.1` にだけ bind し、Nginx が `Host: 127.0.0.1:8080` で渡す設計だが、実測はしていない（421 で断られるなら、ここを疑う） |
+| アクセス制限 | MCP サーバは `127.0.0.1` にだけ bind。外から届くのは Nginx の 443 だけ。必要なら GB10 のファイアウォールで送信元サブネットも絞る |
 
-つまり「認証がある」のではなく「LAN を信頼している」構成である。到達できる範囲を
-ファイアウォールで絞ることが唯一の境界であり、それを外すと社内資料が無制限に
-読める状態になる。信頼できない端末が同じセグメントにいる、あるいは資料に人事・
-契約などの機微情報が含まれるなら、この構成のままでは足りない。認証付きの
-リバースプロキシを前段に置くこと（Nginx の Basic 認証など。GB10 への配置手順は
-[サーバー配置の案内](server-deployment.md) にあり、vLLM への切り替えのときに書く）。
+つまり守りは「トークン」と「到達できる範囲」の2つである。トークンは全員が同じものを
+持つため、退職者が出たらトークンを替えて全員に配り直す。資料に人事・契約などの機微情報が
+含まれるなら、利用者ごとの認証（個別のトークンや SSO）を前段に足すこと。
 
 ## サーバ機の準備
 
-以下では `C:\App\local-llm-rag` に配置する。パスは環境に合わせて読み替える。
+[server-deployment.md](server-deployment.md) の手順 2〜7 に従う。MCP に関わるのは次の点。
 
-### 1. 取得と依存関係
+- 資料は `/opt/rag/source/` に配置し、取り込みは GB10 上でだけ行う
+  （`python -m scripts.ingest_source`、`rag` ユーザーで `/etc/rag/rag.env` を読み込んで実行）。
+- 起動は `deploy/gb10/rag-mcp.service`（`--http --host 127.0.0.1 --port 8080`）。
+  `/mcp` が正しいパスで、`/` に投げると 404 になる。
+- 埋め込みの vLLM（`bge-m3`）が起動していること。**これを欠くと検索が一切成立しない。**
+  生成モデル（gpt-oss）は、この MCP サーバは呼ばない。
+- 自機だけで確かめるには、MCP サーバの `127.0.0.1:8080` に直接投げる。
 
-PowerShell で実行する。
+  ```bash
+  curl -s -X POST http://127.0.0.1:8080/mcp \
+    -H "content-type: application/json" -H "accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
+  ```
 
-```powershell
-New-Item -ItemType Directory -Path "C:\App\local-llm-rag" -Force
-cd C:\App\local-llm-rag
-git clone https://github.com/Hide369/local-llm-rag.git .
-
-python -m venv rag_env
-.\rag_env\Scripts\pip.exe install -r requirements.txt
-```
-
-### 2. Ollama と埋め込みモデル
-
-```powershell
-ollama pull bge-m3
-```
-
-**これを欠くと検索が一切成立しない。** 埋め込みモデルであり、LLM ではない。この
-サーバは LLM を呼ばないので、`gpt-oss:20b` などの生成モデルは不要である。
-
-### 3. 資料を置いて取り込む
-
-```powershell
-# 資料を C:\App\local-llm-rag\source\ に配置してから
-.\rag_env\Scripts\python.exe -m scripts.ingest_source
-```
-
-`source/` は Git 管理外である。取り込みはこのサーバ機でだけ行う。
-
-### 4. 起動を確認する
-
-先にファイアウォールを開けず、自機だけで確かめる。
-
-```powershell
-.\rag_env\Scripts\python.exe -m scripts.rag_mcp_server --http --host 127.0.0.1 --port 8080
-```
-
-別の PowerShell から叩く。
-
-```powershell
-$body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
-Invoke-WebRequest -Uri http://127.0.0.1:8080/mcp -Method Post -Body $body `
-  -ContentType "application/json" -Headers @{ Accept = "application/json, text/event-stream" }
-```
-
-`serverInfo` に `local_docs` が含まれれば正しい。パスは `/mcp` である。`/` に投げると
-404 になる。
-
-確認できたら Ctrl+C で止める。
-
-### 5. LAN へ開く
-
-`--host 0.0.0.0` で全インターフェースに bind し、到達できる範囲をファイアウォールで
-絞る。**この2つは必ずセットにする。** bind だけ広げて規則を書かないと、ポートに
-届く全員へ資料が出る。
-
-```powershell
-# 送信元を自分のサブネットに限定する。範囲は環境に合わせて必ず書き換える
-New-NetFirewallRule -DisplayName "local-docs MCP" -Direction Inbound `
-  -Protocol TCP -LocalPort 8080 -RemoteAddress 192.168.1.0/24 -Action Allow
-```
-
-`-RemoteAddress` を省略すると「どこからでも許可」になる。省略しないこと。
-
-### 6. 常駐させる
-
-通常の Windows には Linux の systemd に相当する仕組みが無いので、
-[NSSM](https://nssm.cc/) でサービス登録する。
-
-```powershell
-nssm install local-docs-mcp "C:\App\local-llm-rag\rag_env\Scripts\python.exe" "-m scripts.rag_mcp_server --http --host 0.0.0.0 --port 8080"
-nssm set local-docs-mcp AppDirectory "C:\App\local-llm-rag"
-nssm set local-docs-mcp AppEnvironmentExtra "OLLAMA_HOST=http://127.0.0.1:11434"
-nssm set local-docs-mcp Start SERVICE_AUTO_START
-nssm start local-docs-mcp
-```
-
-`AppDirectory` の指定は必須である。`-m` 起動でリポジトリルートが `sys.path` に
-入る必要があり、これを欠くと `ModuleNotFoundError: No module named 'ingest'` で
-起動に失敗する。
-
-**Ollama の起動タイミングに注意する。** Windows 版 Ollama は既定でユーザーの
-ログオン時に起動する。MCP サーバをサービスとして起動時に上げると、誰もログオン
-していない状態では Ollama が居らず、検索が「Ollama に接続できません」で失敗する。
-サーバ機を無人運用するなら、Ollama 自体もサービスとして常駐させるか、サーバ機に
-自動ログオンするアカウントを用意する。
+  `serverInfo` に `local_docs` が含まれれば正しい。Nginx 越しは、トークン無しで 401、
+  `-H "Authorization: Bearer <MCP のトークン>"` を付けると同じ応答が返る。
 
 ## クライアント側の設定
 
-各開発者の `~/.codex/config.toml` に足す。
+### Claude Code
+
+```powershell
+claude mcp add --transport http --scope user local_docs https://<GB10のホスト名>/mcp `
+  --header "Authorization: Bearer <MCP のトークン>"
+claude mcp list        # local_docs が Connected であること
+```
+
+**末尾の `/mcp` を省かないこと。** 省くと 404 になり、クライアント側からは「サーバが
+応答しない」としか見えない。内部CAの証明書なら `NODE_EXTRA_CA_CERTS` が要る。
+詳しくは [claude-code-gb10.md](claude-code-gb10.md)。
+
+### Codex（任意）
+
+Codex を使う開発者は `~/.codex/config.toml` に足す。Codex の MCP が `Authorization`
+ヘッダーを送れるかは確かめていない（実測はしていない）。
 
 ```toml
 [mcp_servers.local_docs]
-url = "http://192.168.1.50:8080/mcp"
+url = "https://<GB10のホスト名>/mcp"
 ```
-
-IP はサーバ機のものに置き換える。**末尾の `/mcp` を省かないこと。** 省くと 404 に
-なり、Codex 側からは「サーバが応答しない」としか見えない。
 
 `command` / `args` / `cwd` は書かない。それは1台構成（stdio）の書き方であり、
 [mcp-server.md](mcp-server.md) にある。両方を書くと衝突する。
 
-### 検索を呼ばせる指示は toml では書けない
+### 検索を呼ばせる指示は接続の設定では書けない
 
-toml が教えるのは接続先だけである。**どの質問で検索するか**はエージェントの判断に
+接続の設定が教えるのは接続先だけである。**どの質問で検索するか**はエージェントの判断に
 委ねられ、それは別の場所で決まる。ツールの説明文は「社内資料を検索し、根拠となる
 原文を出典つきで返す」だけで
 （[rag_mcp_server.py:205](../scripts/rag_mcp_server.py#L205)）、呼ぶべき条件を
 含まない。エージェントが自分の知識で答えてしまえば、サーバが結果に添える歯止め
 （`_FALLBACK` / `_CAUTION`）は一度も読まれずに終わる。
 
-そこで各開発者の `~/.codex/AGENTS.md` に、本リポジトリの [AGENTS.md](../AGENTS.md)
+そこで各開発者の指示ファイル（Claude Code は `%USERPROFILE%\.claude\CLAUDE.md`、Codex は `~/.codex/AGENTS.md`）に、本リポジトリの [AGENTS.md](../AGENTS.md)
 から「社内資料の参照」節をそのまま貼る。ここに置いた AGENTS.md は Codex が
 リポジトリを問わず読むので、開発者が別のリポジトリで作業していても効く（場所は
 `CODEX_HOME` の直下である。既定が `~/.codex` であり、`codex doctor` の
@@ -184,7 +126,7 @@ AGENTS.md にしか無いのは次の2つで、どちらもサーバからは手
 
 ## 動作確認
 
-Codex に「社内資料で〜を調べて」と頼み、出典つきの原文が返ることを見る。
+Claude Code に「社内資料で〜を調べて」と頼み、出典つきの原文が返ることを見る。
 
 接続はできているのに `search_documents` が一度も呼ばれない場合は
 [mcp-tool-not-called.md](mcp-tool-not-called.md) にある。サーバのアクセスログでは
@@ -229,9 +171,9 @@ DB が空のままだと「ベクトルDBが空です。取り込みが未実行
 **同時アクセスは順番待ちになる。** 検索は直列化してある。複数PCから同時に引くと
 共有キャッシュが競合し、例外を出さないまま検索結果がずれるためである。
 
-検索1回はおよそ **3.6 秒**、サーバ起動後の**初回だけ 8.2 秒**である（この構成
+検索1回は、以前の構成（Windows PC + Ollama）で、およそ **3.6 秒**、サーバ起動後の**初回だけ 8.2 秒**である（この構成
 そのもの、つまり `--http` で起動したサーバへ HTTP の `tools/call` を投げて計測。
-2026-09-08、i5-1240P / Windows 11、570 出現・本文 512 種）。初回の上乗せは
+2026-09-08、i5-1240P / Windows 11、570 出現・本文 512 種。GB10 + vLLM では測っていない）。初回の上乗せは
 リランカーの読み込みである。
 
 3人が同時に叩けば、最後の1人はおよそ 11 秒待つ。

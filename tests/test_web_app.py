@@ -22,7 +22,7 @@ from ingest.embedder import EMBED_DIM, EmbeddingError
 from ingest.models import Chunk
 from ingest.parsers import SUPPORTED_SUFFIXES
 from ingest.prompting import format_report
-from rag_web.app import CHAT_MODEL, CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, STATIC_DIR, create_app
+from rag_web.app import CSRF_HEADER, CSRF_VALUE, DOCS_INGEST_COMMAND, STATIC_DIR, create_app
 from rag_web.auth import LoginThrottle, hash_password
 from rag_web.cowork import NO_TEMPLATE_LABEL, is_source_suffix, output_suffixes
 from rag_web.jobs import JobStore
@@ -66,7 +66,7 @@ class Fake:
         self.chat_calls = []
         self.ingest_directory_calls = []
         self.ingest_uploads_calls = []
-        self.ollama_error: Exception | None = None
+        self.embedder_error: Exception | None = None
         self.reranker_checks = 0
         # 設定すると ingest_uploads / ingest_directory はこれが set されるまで返らない。
         self.release: threading.Event | None = None
@@ -99,15 +99,15 @@ class Fake:
         self.chat_calls.append((model, messages, temperature))
         yield from ("東", "京")
 
-    def ask_json(self, model, prompt, num_ctx=None):
-        self.ask_json_calls.append((model, prompt, num_ctx))
+    def ask_json(self, model, prompt):
+        self.ask_json_calls.append((model, prompt))
         self.ask_started.set()
         if self.ask_release is not None:
             assert self.ask_release.wait(WAIT_S), "テストが ask_release を set しなかった"
         return self.ask_json_reply
 
-    def ask_text(self, model, prompt, num_ctx=None):
-        self.ask_text_calls.append((model, prompt, num_ctx))
+    def ask_text(self, model, prompt):
+        self.ask_text_calls.append((model, prompt))
         self.text_started.set()
         if self.text_release is not None:
             assert self.text_release.wait(WAIT_S), "テストが text_release を set しなかった"
@@ -123,9 +123,9 @@ class Fake:
     def build_index(self, collection):
         return object()
 
-    def check_ollama(self):
-        if self.ollama_error is not None:
-            raise self.ollama_error
+    def check_embedder(self):
+        if self.embedder_error is not None:
+            raise self.embedder_error
 
     def check_vlm(self):
         return None
@@ -168,7 +168,7 @@ class Fake:
             search=self.search,
             build_index=self.build_index,
             open_store=self.open_store,
-            check_ollama=self.check_ollama,
+            check_embedder=self.check_embedder,
             # テストが後から差し替えられるよう、呼び出しのたびに属性を引く。
             check_vlm=lambda: self.check_vlm(),
             caption_image=self.caption_image,
@@ -198,6 +198,10 @@ def fake(tmp_path, jobs):
     fake.close_stores()
 
 
+# create_app へ明示的に渡す生成モデル名。環境変数 VLLM_CHAT_MODEL に依存させない。
+CHAT_MODEL = "test-chat-model"
+
+
 def _client(fake, jobs, max_upload_bytes=1024, throttle=None, **settings_overrides):
     settings = WebSettings(
         admin_password_hash=PASSWORD_HASH, max_upload_bytes=max_upload_bytes,
@@ -209,6 +213,7 @@ def _client(fake, jobs, max_upload_bytes=1024, throttle=None, **settings_overrid
         jobs=jobs,
         throttle=throttle,
         today=lambda: date(2026, 11, 22),
+        chat_model=CHAT_MODEL,
     )
     return TestClient(app)
 
@@ -375,6 +380,33 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     assert client.get("/api/status", params={"corpus": "other"}).status_code == 422
 
 
+def _record_other_embedding_model(path):
+    seed = vector_store.open_store(path)
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+
+
+def test_a_mismatched_db_shows_a_readable_message_not_a_500(client, fake):
+    """設定側の食い違いは利用者が直せる。内部エラーの定型文にしない。"""
+    _record_other_embedding_model(fake.db_paths["internal"])
+
+    response = client.get("/api/status", params={"corpus": "internal"})
+
+    assert response.status_code == 503
+    assert "qwen3-embedding" in response.json()["detail"]
+    assert "VLLM_EMBED_MODEL" in response.json()["detail"]
+
+
+def test_a_mismatched_db_reaches_the_chat_screen_as_an_error_event(client, fake):
+    _record_other_embedding_model(fake.db_paths["internal"])
+
+    text = client.post("/api/chat", json=_chat_body(), headers=CSRF).text
+
+    assert "qwen3-embedding" in text
+    assert '"type": "error"' in text
+
+
 def test_status_of_an_empty_docs_corpus_carries_the_ingest_command(client):
     """技術ドキュメントが0件のとき、画面が警告に出す取り込みコマンドを status が返す。
 
@@ -484,12 +516,12 @@ def test_ingest_reports_vlm_unavailable_as_notice(client, fake, jobs):
     assert fake.ingest_directory_calls == [(fake.source_dir, None)]
 
 
-def test_ingest_returns_503_when_ollama_down(client, fake):
-    fake.ollama_error = EmbeddingError("Ollamaに接続できません")
+def test_ingest_returns_503_when_embedder_down(client, fake):
+    fake.embedder_error = EmbeddingError("vLLM（埋め込み）に接続できません")
     _login(client)
     response = client.post("/api/ingest", headers=CSRF)
     assert response.status_code == 503
-    assert response.json()["detail"] == "Ollamaに接続できません"
+    assert response.json()["detail"] == "vLLM（埋め込み）に接続できません"
     assert fake.ingest_directory_calls == []
 
 
@@ -647,10 +679,10 @@ def test_upload_too_large_returns_413(fake, jobs):
 
 
 def test_upload_returns_503_when_ollama_down(client, fake):
-    fake.ollama_error = EmbeddingError("Ollamaに接続できません")
+    fake.embedder_error = EmbeddingError("vLLM（埋め込み）に接続できません")
     response = client.post("/api/uploads", json=_upload_body(("a.txt", b"x")), headers=CSRF)
     assert response.status_code == 503
-    assert response.json()["detail"] == "Ollamaに接続できません"
+    assert response.json()["detail"] == "vLLM（埋め込み）に接続できません"
     assert fake.ingest_uploads_calls == []
 
 

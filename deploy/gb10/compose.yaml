@@ -1,0 +1,147 @@
+# GB10（DGX Spark、DGX OS 7 = Ubuntu 24.04、aarch64、統合メモリ128GB）で動かす vLLM 3つ。
+#
+# 実測はしていない。この設定は GB10 の実機で起動したことがない。数値（メモリの割合・
+# 最大長）は設計書「メモリ配分」の見込みで、docs/server-deployment.md の手順で
+# 実機の値に直すこと。
+#
+# 使い方（docs/server-deployment.md の手順 5）:
+#   cd /opt/rag/deploy/gb10
+#   docker compose --env-file /etc/rag/vllm.env up -d
+#
+# /etc/rag/vllm.env（リポジトリの外、権限 600）に次の2行を書く。値はここに書かない。
+#   VLLM_API_KEY=<十分に長いランダム文字列>
+#   HF_CACHE_DIR=/srv/models/huggingface
+#
+# 3つとも 127.0.0.1 にだけ公開する。外から届くのは Nginx（nginx-rag.conf）経由だけ。
+
+x-vllm-common: &vllm-common
+  # 版は固定する（latest は使わない）。NVIDIA の NGC の vLLM コンテナ。
+  # 26.04-py3 は vLLM 0.19.0（CUDA 13.2.1 ベース）。NVIDIA のリリースノートに、DGX Spark のような
+  # 統合メモリでは --gpu-memory-utilization を下げよとの注意がある。新しい版へ上げるときは
+  # リリースノート（docs.nvidia.com/deeplearning/frameworks/vllm-release-notes/）で
+  # 版と必要なドライバーを確かめてから、この1行だけを書き換える。
+  # 実測はしていない（このタグを GB10 で起動したことはない）。ドライバーの要件は
+  # docs/server-deployment.md の手順 3 で確かめる。
+  image: nvcr.io/nvidia/vllm:26.04-py3
+  # NGC のイメージの既定の入口に依らず、vllm serve を明示する。
+  entrypoint: ["vllm", "serve"]
+  restart: unless-stopped
+  ipc: host
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+  environment:
+    # vLLM は --api-key の既定値をこの環境変数から読む。値を compose.yaml やコマンド行
+    # （ps で見える）に書かないための経路。起動後に、キー無しの要求が 401 になることを確かめる。
+    VLLM_API_KEY: ${VLLM_API_KEY:?/etc/rag/vllm.env に VLLM_API_KEY を書くこと}
+    # モデルを事前に取得してあれば、起動時にネットワークへ出さない（手順 4）。
+    HF_HUB_OFFLINE: "1"
+  volumes:
+    - ${HF_CACHE_DIR:?/etc/rag/vllm.env に HF_CACHE_DIR を書くこと}:/root/.cache/huggingface
+
+services:
+  # 生成。Claude Code も /llm/ 経由でここを使う（/v1/messages）。
+  vllm-chat:
+    <<: *vllm-common
+    container_name: vllm-chat
+    ports:
+      - "127.0.0.1:8001:8000"
+    command:
+      - openai/gpt-oss-120b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - gpt-oss-120b
+      # 統合メモリ全体（128GB）に対する割合。重み約61GB + KV キャッシュ。見込みで、実測で決める。
+      - --gpu-memory-utilization
+      - "0.55"
+      # Claude Code は1回の要求が大きい（指示文だけで数万トークン）ため 64K。
+      - --max-model-len
+      - "65536"
+      # gpt-oss 向けの公式の手順（vLLM の gpt-oss 手順書）。道具呼び出しに要る。
+      # Colab の gpt-oss-20b でも同じ指定で動いた（2026-11-23）。
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - openai
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 120s
+
+  # 画像説明。取り込み・アップロード・Cowork の添付のときだけ使う。
+  vllm-vlm:
+    <<: *vllm-common
+    container_name: vllm-vlm
+    ports:
+      - "127.0.0.1:8003:8000"
+    # 空きメモリの確認が重ならないよう、生成の起動が終わってから起動する。
+    depends_on:
+      vllm-chat:
+        condition: service_healthy
+    command:
+      - Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - qwen3-vl-30b-a3b
+      # 重み約31GB + KV キャッシュ。見込みで、実測で決める。
+      - --gpu-memory-utilization
+      - "0.28"
+      - --max-model-len
+      - "16384"
+      # 画像だけを扱う。動画を許すと長い動画用のメモリを確保してしまう。
+      - --limit-mm-per-prompt
+      - '{"video": 0}'
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 120s
+
+  # 埋め込み。既存の DB が bge-m3（1024次元）製のため、モデルは変えない。
+  vllm-embed:
+    <<: *vllm-common
+    container_name: vllm-embed
+    ports:
+      - "127.0.0.1:8002:8000"
+    depends_on:
+      vllm-vlm:
+        condition: service_healthy
+    command:
+      - BAAI/bge-m3
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - bge-m3
+      - --gpu-memory-utilization
+      - "0.04"
+      # bge-m3 は config.json が XLMRobertaModel と宣言しているため、hf-overrides で
+      # 埋め込み用のモデルに差し替え、pooling の task を embed にする（Colab の
+      # colab/run_vllm_server.ipynb で動いた指定と同じ）。
+      - --runner
+      - pooling
+      - --hf-overrides
+      - '{"architectures": ["BgeM3EmbeddingModel"]}'
+      - --pooler-config.task
+      - embed
+      - --max-model-len
+      - "8192"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s

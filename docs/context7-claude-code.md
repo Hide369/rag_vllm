@@ -124,7 +124,7 @@ notepad $env:USERPROFILE\.claude\CLAUDE.md
 #### 記述例
 
 `AGENTS.md` の「外部ドキュメントの参照」節のうち、context7 に関わる項目だけを
-抜き出したものである。リランカーの HEAD・`fetch_docs.py`・`OLLAMA_HOST` の項は
+抜き出したものである。リランカーの HEAD・`fetch_docs.py`・`VLLM_*` の項は
 本リポジトリ固有の説明なので入れない。手順書へのリンク（`docs/...`）も他の
 リポジトリからは辿れないので外してある。
 

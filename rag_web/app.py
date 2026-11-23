@@ -34,6 +34,7 @@ from ingest import store
 from ingest.embedder import EmbeddingError
 from ingest.parsers import SUPPORTED_SUFFIXES
 from ingest.prompting import format_report
+from ingest.vllm_config import load_vllm_settings
 from scripts.ingest_source import UPLOAD_PREFIX
 
 from .answering import ChatRequest, answer_events
@@ -60,10 +61,6 @@ CSRF_HEADER = "X-Requested-With"
 CSRF_VALUE = "rag-web"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 VENDOR_DIR = STATIC_DIR / "vendor"
-
-# 回答生成に使うモデル。画面からは選ばせない（接続先の Ollama に置いてある生成モデルが
-# これ1つだけで、選択肢を出しても利用者に選ぶ意味がないため）。変えるときはここを直す。
-CHAT_MODEL = "gpt-oss:20b"
 
 # 社内資料以外（技術ドキュメント）のコーパスが空のとき、画面に示す取り込みコマンド。
 DOCS_INGEST_COMMAND = (
@@ -296,8 +293,13 @@ def create_app(
     jobs: JobStore | None = None,
     throttle: LoginThrottle | None = None,
     today: Callable[[], date] = date.today,
+    chat_model: str | None = None,
 ) -> FastAPI:
     validate_password_hash(settings.admin_password_hash)
+    # 回答生成に使うモデル。画面からは選ばせない（接続先の vLLM が載せている生成モデルが
+    # これ1つだけで、選択肢を出しても利用者に選ぶ意味がないため）。変えるときは .env の
+    # VLLM_CHAT_MODEL を直す。引数はテストから差し替えるためのもので、環境変数に依存させない。
+    chat_model = chat_model or load_vllm_settings().chat_model
     services = services or Services()
     jobs = jobs or JobStore()
     throttle = throttle or LoginThrottle()
@@ -323,6 +325,14 @@ def create_app(
     def shared_busy(_request: Request, _error: SharedOperationBusy) -> JSONResponse:
         return JSONResponse({"detail": SHARED_BUSY_MESSAGE}, status_code=409)
 
+    @app.exception_handler(store.EmbeddingMismatchError)
+    def embedding_mismatch(
+        _request: Request, error: store.EmbeddingMismatchError
+    ) -> JSONResponse:
+        # 設定側の問題であり、サーバーの不具合ではない。利用者が次にすることを
+        # 書いた文言をそのまま見せる（500 の定型文にしない）。
+        return JSONResponse({"detail": str(error)}, status_code=503)
+
     def is_admin(request: Request) -> bool:
         return sessions.is_valid(request.cookies.get(COOKIE_NAME))
 
@@ -336,10 +346,10 @@ def create_app(
         if not is_admin(request):
             raise HTTPException(401, "管理者としてログインしてください")
 
-    def require_ollama() -> None:
+    def require_embedder() -> None:
         # 取り込みを始めてから落ちるのを防ぐ。CLI と同じ確認。
         try:
-            services.check_ollama()
+            services.check_embedder()
         except EmbeddingError as e:
             raise HTTPException(503, str(e)) from e
 
@@ -412,7 +422,7 @@ def create_app(
     def chat(body: ChatBody) -> StreamingResponse:
         request = ChatRequest(
             corpus=body.corpus,
-            model=CHAT_MODEL,
+            model=chat_model,
             temperature=body.temperature,
             question=body.question,
             history=[message.model_dump() for message in body.history],
@@ -428,7 +438,7 @@ def create_app(
 
     @app.post("/api/ingest", dependencies=[Depends(require_admin)])
     def ingest() -> dict:
-        require_ollama()
+        require_embedder()
         caption_image, reason = caption_image_or_reason(services)
         collection = corpora.collection(INTERNAL)
 
@@ -459,7 +469,7 @@ def create_app(
     @app.post("/api/uploads", dependencies=[Depends(require_csrf_header)])
     def upload(body: UploadBody) -> dict:
         files = _decode_uploads(body.files, settings.max_upload_bytes)
-        require_ollama()
+        require_embedder()
         caption_image, reason = caption_image_or_reason(services)
         collection = corpora.collection(INTERNAL)
 
@@ -519,7 +529,7 @@ def create_app(
             except FileNotFoundError as e:
                 raise HTTPException(400, NO_SUCH_TEMPLATE_MESSAGE) from e
         request = CoworkRequest(
-            model=CHAT_MODEL,
+            model=chat_model,
             question=body.question,
             template=body.template,
             output_suffix=body.output_suffix,

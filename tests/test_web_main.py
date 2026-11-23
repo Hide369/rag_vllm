@@ -1,7 +1,4 @@
 """python -m rag_web の入口。uvicorn は偽物に差し替え、実際には起動しない。"""
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -70,20 +67,35 @@ def test_main_ignores_proxy_headers_when_allow_list_is_empty(monkeypatch):
     assert kwargs["forwarded_allow_ips"] is None
 
 
-def test_importing_main_does_not_import_ingest():
-    # ingest.embedder は OLLAMA_HOST をインポート時に読む。.env を読む前に取り込まれると
-    # .env の OLLAMA_HOST が効かないため、入口のインポートだけでは ingest を読まない。
-    # 同じプロセスでは他のテストが ingest を読み込み済みなので、別プロセスで確かめる。
-    code = (
-        "import sys, rag_web.__main__; "
-        "loaded = sorted(m for m in sys.modules if m == 'ingest' or m.startswith('ingest.')); "
-        "assert not loaded, loaded"
+def test_main_refuses_to_start_with_a_legacy_ollama_setting(monkeypatch, capsys):
+    monkeypatch.setenv("RAG_WEB_ADMIN_PASSWORD_HASH", hash_password("correct horse battery", n=2 ** 4))
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    calls = []
+    monkeypatch.setattr(web_main.uvicorn, "run", lambda app, **kw: calls.append(kw))
+
+    assert web_main.main() == 2
+
+    err = capsys.readouterr().err
+    assert err.startswith("エラー: ")
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err
+    assert calls == []
+
+
+def test_main_gives_the_chat_model_from_the_environment_to_the_app(monkeypatch):
+    monkeypatch.setenv("RAG_WEB_ADMIN_PASSWORD_HASH", hash_password("correct horse battery", n=2 ** 4))
+    monkeypatch.setenv("VLLM_CHAT_MODEL", "custom-chat")
+    seen = {}
+    monkeypatch.setattr(
+        web_main.uvicorn, "run", lambda app, **kw: seen.update(app=app)
     )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=Path(__file__).resolve().parent.parent,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
+    real_create_app = web_main.create_app
+
+    def spy(settings, **kwargs):
+        seen["chat_model"] = kwargs.get("chat_model")
+        return real_create_app(settings, **kwargs)
+
+    monkeypatch.setattr(web_main, "create_app", spy)
+
+    assert web_main.main() == 0
+    assert seen["chat_model"] == "custom-chat"

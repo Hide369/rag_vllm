@@ -84,14 +84,14 @@ class Recorder:
         self.parse_calls = []
         self.opened = []
 
-    def ask_json(self, model, prompt, num_ctx=None):
-        self.ask_json_calls.append((model, prompt, num_ctx))
+    def ask_json(self, model, prompt):
+        self.ask_json_calls.append((model, prompt))
         if prompt.startswith("あなたは技術ドキュメント検索のためのクエリ作成者です。"):
             return json.dumps({"query": "goroutines"})
         return self.ask_json_reply
 
-    def ask_text(self, model, prompt, num_ctx=None):
-        self.ask_text_calls.append((model, prompt, num_ctx))
+    def ask_text(self, model, prompt):
+        self.ask_text_calls.append((model, prompt))
         return self.ask_text_reply
 
     def search(self, collection, query, **kwargs):
@@ -214,12 +214,15 @@ def test_unfilled_marks_are_listed_as_warning(recorder, services, corpora):
     assert result["download"] is not None
 
 
-def test_generation_uses_larger_context_size(recorder, services, corpora):
+def test_generation_does_not_cap_output_tokens(recorder, services, corpora):
+    """出力の上限を指定しない。思考も上限を食うため、決め打ちすると本文が途中で切れる。
+    recorder の ask_json / ask_text は (model, prompt) しか受けないので、上限などの
+    追加引数を渡すと TypeError になる。"""
     name = _template(recorder)
     _run(_request(template=name), services, corpora)
     _run(_request(), services, corpora)
-    assert [call[2] for call in recorder.ask_json_calls] == [filling.GENERATION_NUM_CTX]
-    assert [call[2] for call in recorder.ask_text_calls] == [filling.GENERATION_NUM_CTX]
+    assert [call[0] for call in recorder.ask_json_calls] == ["m"]
+    assert [call[0] for call in recorder.ask_text_calls] == ["m"]
 
 
 def test_docs_not_searched_unless_requested(recorder, services, corpora):
@@ -238,8 +241,6 @@ def test_docs_searched_with_topic_query_and_floor(recorder, services, corpora):
     assert query == "goroutines"
     assert kwargs["rerank_floor"] == DOCS_RERANK_FLOOR
     assert kwargs["rerank"] is services.rerank
-    # topic_query の英訳は文書生成ではないので、既定の文脈長のまま呼ぶ。
-    assert recorder.ask_json_calls[0][2] is None
     assert [source["kind"] for source in result["sources"]] == ["技術ドキュメント"]
 
 
@@ -429,9 +430,9 @@ def test_diagram_failures_are_reported(recorder, services, corpora, monkeypatch)
 
 
 def test_search_error_becomes_result_error(recorder, services, corpora):
-    recorder.search_error = EmbeddingError("Ollamaに接続できません")
+    recorder.search_error = EmbeddingError("vLLM（埋め込み）に接続できません")
     result = _run(_request(), services, corpora)
-    assert result["errors"] == ["Ollamaに接続できません"]
+    assert result["errors"] == ["vLLM（埋め込み）に接続できません"]
     assert result["download"] is None
 
 

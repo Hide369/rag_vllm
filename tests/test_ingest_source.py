@@ -45,13 +45,16 @@ class _FakeSession:
     def post(self, url, json, timeout):
         self.calls += 1
         count = len(json["input"])
-        return _FakeResponse({"embeddings": [[0.1] * EMBED_DIM for _ in range(count)]})
+        data = [{"index": i, "embedding": [0.1] * EMBED_DIM} for i in range(count)]
+        return _FakeResponse({"data": data})
 
     def close(self):
         pass
 
 
 class _FakeResponse:
+    status_code = 200
+
     def __init__(self, payload):
         self._payload = payload
 
@@ -354,7 +357,7 @@ def test_main_forwards_force_flag_to_ingest_directory(tmp_path, monkeypatch):
         return ingest_source.IngestReport()
 
     monkeypatch.setattr(ingest_source, "ingest_directory", _fake_ingest_directory)
-    monkeypatch.setattr(ingest_source.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         ingest_source.store, "open_store", lambda path: _FakeCollectionForMain()
     )
@@ -380,7 +383,7 @@ def test_main_forwards_only_suffix_to_ingest_directory(monkeypatch, tmp_path):
         return ingest_source.IngestReport()
 
     monkeypatch.setattr(ingest_source, "ingest_directory", fake_ingest_directory)
-    monkeypatch.setattr(ingest_source.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         ingest_source.store, "open_store", lambda path: _FakeCollectionForMain()
     )
@@ -399,7 +402,7 @@ def test_main_opens_the_shared_store_path(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ingest_source, "ingest_directory", lambda *a, **k: ingest_source.IngestReport()
     )
-    monkeypatch.setattr(ingest_source.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         ingest_source.store,
         "open_store",
@@ -427,7 +430,7 @@ def test_main_prints_the_resolved_absolute_db_path(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(
         ingest_source, "ingest_directory", lambda *a, **k: ingest_source.IngestReport()
     )
-    monkeypatch.setattr(ingest_source.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         ingest_source.store, "open_store", lambda path: _FakeCollectionForMain()
     )
@@ -454,7 +457,7 @@ def _run_main_with(monkeypatch, tmp_path, collection):
     monkeypatch.setattr(
         ingest_source, "ingest_directory", lambda *a, **k: ingest_source.IngestReport()
     )
-    monkeypatch.setattr(ingest_source.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(ingest_source.store, "open_store", lambda path: collection)
     monkeypatch.setattr(sys, "argv", ["ingest_source", "--source-dir", str(tmp_path)])
     return ingest_source.main()
@@ -501,7 +504,7 @@ def test_main_prints_the_navigation_summary_lines(monkeypatch, tmp_path, capsys)
         return report
 
     monkeypatch.setattr(ingest_source, "ingest_directory", fake_ingest_directory)
-    monkeypatch.setattr(ingest_source.embedder, "check_ollama", lambda: None)
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
     monkeypatch.setattr(
         ingest_source.store, "open_store", lambda path: _FakeHealthyCollection()
     )
@@ -640,7 +643,7 @@ class _BrokenSession:
     """
 
     def post(self, url, json, timeout):
-        raise RuntimeError("Ollama に接続できません")
+        raise RuntimeError("vLLM に接続できません")
 
     def close(self):
         pass
@@ -859,3 +862,44 @@ def test_ingest_directory_does_not_keep_code_blocks_by_default(tmp_path, monkeyp
     ingest_source.ingest_directory(tmp_path, collection, session=_FakeSession())
 
     assert seen == [False]
+
+
+def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(tmp_path, monkeypatch, capsys):
+    """古い OLLAMA_* が残っていれば、取り込みを始める前に止まる。"""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        sys, "argv", ["ingest_source.py", "--source-dir", str(source_dir)]
+    )
+
+    assert ingest_source.main() == 2
+
+    err = capsys.readouterr().err
+    assert "OLLAMA_HOST" in err
+    assert "VLLM_" in err
+
+
+def test_main_stops_before_ingesting_into_a_db_built_with_another_model(
+    monkeypatch, tmp_path, capsys
+):
+    """別のモデルのベクトルを混ぜると、距離が黙って狂う。取り込む前に止める。"""
+    from ingest import vector_store
+
+    db = tmp_path / "s.sqlite3"
+    seed = vector_store.open_store(str(db))
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+    called = []
+    monkeypatch.setattr(
+        ingest_source, "ingest_directory", lambda *a, **k: called.append(1)
+    )
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
+    monkeypatch.setattr(
+        sys, "argv", ["ingest_source", "--source-dir", str(tmp_path), "--db", str(db)]
+    )
+
+    assert ingest_source.main() == 2
+    assert "qwen3-embedding" in capsys.readouterr().out
+    assert called == []

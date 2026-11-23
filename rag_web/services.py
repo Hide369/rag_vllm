@@ -1,6 +1,6 @@
 """外部 I/O の束。
 
-Ollama・VLM・リランカー・DB・取り込みなど、プロセスの外に触れる関数を1か所に
+vLLM（生成・埋め込み・画像説明）・リランカー・DB・取り込みなど、プロセスの外に触れる関数を1か所に
 まとめる。テストは Services の欄を偽物に差し替えるだけで済み、monkeypatch で
 モジュールの属性を書き換えずに済む。
 """
@@ -22,7 +22,7 @@ def _default_db_paths() -> dict[str, str]:
 @dataclass(frozen=True)
 class Services:
     stream_chat: Callable[[str, list[dict], float], Iterator[str]] = chat.stream_chat
-    # (model, prompt, num_ctx=)。文書生成だけ num_ctx を広げて呼ぶ。
+    # (model, prompt)。出力の上限は指定せず、サーバーの最大長に任せる。
     ask_json: Callable[..., str] = chat.ask_json
     ask_text: Callable[..., str] = chat.ask_text
     # (path, caption_image=)。Cowork の添付から本文を取り出す。
@@ -31,7 +31,7 @@ class Services:
     search: Callable[..., list] = retrieval.search
     build_index: Callable = retrieval.build_index
     open_store: Callable[[str], object] = vector_store.open_store
-    check_ollama: Callable[[], None] = embedder.check_ollama
+    check_embedder: Callable[[], None] = embedder.check_embedder
     check_vlm: Callable[[], None] = vlm.check_vlm
     caption_image: Callable = vlm.caption_image
     check_reranker: Callable[[], None] = reranker.check_reranker

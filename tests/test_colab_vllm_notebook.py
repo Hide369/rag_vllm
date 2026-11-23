@@ -116,30 +116,84 @@ def test_gpu_check_accepts_l4(monkeypatch, capsys):
     assert "NVIDIA L4" in capsys.readouterr().out
 
 
-def test_vllm_starts_on_8001_with_spec_flags(tmp_path, monkeypatch):
+def _commands(calls):
+    """起動した vLLM のコマンドを、--served-model-name をキーにして返す。"""
+    commands = {}
+    for args, _ in calls["popen"]:
+        command = args[0]
+        commands[command[command.index("--served-model-name") + 1]] = command
+    return commands
+
+
+def _option(command, name):
+    return command[command.index(name) + 1]
+
+
+def test_chat_embed_profile_starts_gpt_oss_and_bge_m3_on_separate_ports(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     calls = _install_process_fakes(monkeypatch, process=FakeProcess())
 
     namespace = _settings()
+    assert namespace["VLLM_PROFILE"] == "chat+embed"
     exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), namespace)
 
-    args, _ = calls["popen"][0]
-    command = args[0]
-    assert command == namespace["VLLM_COMMAND"]
-    assert command[0] == "/content/vllm-env/bin/vllm"
-    for expected in (
-        "serve",
-        "openai/gpt-oss-20b",
-        "--port",
-        "8001",
-        "--max-model-len",
-        "65536",
-        "--gpu-memory-utilization",
-        "0.90",
-    ):
-        assert expected in command
-    assert command[command.index("--port") + 1] == "8001"
-    assert namespace["vllm_proc"].poll() is None
+    commands = _commands(calls)
+    assert set(commands) == {"gpt-oss-20b", "bge-m3"}
+
+    chat = commands["gpt-oss-20b"]
+    assert chat[:3] == ["/content/vllm-env/bin/vllm", "serve", "openai/gpt-oss-20b"]
+    assert _option(chat, "--port") == "8001"
+    assert _option(chat, "--host") == "127.0.0.1"
+    # gpt-oss の道具呼び出し（Claude Code に必要）は公式手順の指定による
+    assert "--enable-auto-tool-choice" in chat
+    assert _option(chat, "--tool-call-parser") == "openai"
+
+    embed = commands["bge-m3"]
+    assert embed[:3] == ["/content/vllm-env/bin/vllm", "serve", "BAAI/bge-m3"]
+    assert _option(embed, "--port") == "8002"
+    assert _option(embed, "--runner") == "pooling"
+    assert _option(embed, "--pooler-config.task") == "embed"
+    assert json.loads(_option(embed, "--hf-overrides")) == {"architectures": ["BgeM3EmbeddingModel"]}
+
+    assert set(namespace["vllm_procs"]) == {"chat", "embed"}
+
+
+def test_chat_and_embed_memory_fractions_fit_on_one_gpu(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = _install_process_fakes(monkeypatch, process=FakeProcess())
+
+    exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), _settings())
+
+    fractions = [
+        float(_option(args[0], "--gpu-memory-utilization")) for args, _ in calls["popen"]
+    ]
+    assert len(fractions) == 2
+    # 2つのプロセスのCUDAコンテキスト分の余裕を残す
+    assert sum(fractions) <= 0.90
+
+
+def test_vlm_profile_starts_only_qwen3_vl_on_8003(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = _install_process_fakes(monkeypatch, process=FakeProcess())
+
+    namespace = _settings()
+    namespace["VLLM_PROFILE"] = "vlm"
+    exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), namespace)
+
+    commands = _commands(calls)
+    assert set(commands) == {"qwen3-vl-8b"}
+    vlm = commands["qwen3-vl-8b"]
+    assert vlm[:3] == ["/content/vllm-env/bin/vllm", "serve", "Qwen/Qwen3-VL-8B-Instruct"]
+    assert _option(vlm, "--port") == "8003"
+    assert float(_option(vlm, "--gpu-memory-utilization")) <= 0.95
+
+
+def test_unknown_profile_is_rejected():
+    namespace = _settings()
+    namespace["VLLM_PROFILE"] = "chat"
+
+    with pytest.raises(ValueError, match="VLLM_PROFILE"):
+        namespace["active_services"]()
 
 
 def test_vllm_crash_fails_fast_with_log_tail(tmp_path, monkeypatch, capsys):
@@ -220,6 +274,10 @@ class NotebookAccessError(Exception):
     """google.colab.userdata.NotebookAccessError の代わり（シークレットへのアクセス未許可）。"""
 
 
+class TimeoutException(Exception):
+    """google.colab.userdata.TimeoutException の代わり（Colab UI 以外、または許可の確認に未応答）。"""
+
+
 def _run_ngrok_cell(monkeypatch, *, secret, typed="typed-token", calls=None):
     """ngrok セルを偽の pyngrok / getpass / google.colab.userdata で実行し、呼び出し記録を返す。
 
@@ -255,6 +313,7 @@ def _run_ngrok_cell(monkeypatch, *, secret, typed="typed-token", calls=None):
     userdata = types.ModuleType("google.colab.userdata")
     userdata.SecretNotFoundError = SecretNotFoundError
     userdata.NotebookAccessError = NotebookAccessError
+    userdata.TimeoutException = TimeoutException
 
     def get(name):
         assert name == "NGROK_AUTHTOKEN"
@@ -303,7 +362,8 @@ def test_ngrok_cell_uses_colab_secret_without_prompting(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "secret", [SecretNotFoundError("missing"), NotebookAccessError("denied"), ""]
+    "secret",
+    [SecretNotFoundError("missing"), NotebookAccessError("denied"), TimeoutException("timed out"), ""],
 )
 def test_ngrok_cell_falls_back_to_prompt_when_secret_unavailable(monkeypatch, secret):
     calls = _run_ngrok_cell(monkeypatch, secret=secret, typed=" typed-token ")
@@ -330,7 +390,7 @@ def test_vllm_restart_terminates_previous_process(tmp_path, monkeypatch):
     previous = FakeProcess()
 
     namespace = _settings()
-    namespace["vllm_proc"] = previous
+    namespace["vllm_procs"] = {"chat": previous}
     exec(compile(_code_cell("# 3."), "vllm-start-cell", "exec"), namespace)
 
     assert previous.terminated is True
@@ -382,24 +442,37 @@ class _Upstream:
         self.closed = True
 
 
-def _authorized_request(key):
+def _bearer_request(key, method="POST"):
     class Request:
-        method = "POST"
         query_params = {}
-        headers = {"x-api-key": key, "content-type": "application/json"}
+        headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
 
         async def body(self):
             return b"{}"
 
+    Request.method = method
     return Request()
 
 
-def test_proxy_reads_key_at_runtime_and_streams_v1_routes(tmp_path, monkeypatch):
+def _record_upstream_hosts(module):
+    """どのルートのクライアントが送ったかを、base_url で記録する。"""
+    sent_to = []
+    for client in module._clients.values():
+        original = client.send
+
+        async def send(request, stream=False, _client=client, _original=original):
+            sent_to.append(_client.kwargs["base_url"])
+            return await _original(request, stream=stream)
+
+        client.send = send
+    return sent_to
+
+
+def test_proxy_reads_key_at_runtime_and_routes_chat_to_the_chat_vllm(tmp_path, monkeypatch):
     secret = "runtime-only-secret"
     import secrets
 
     monkeypatch.delenv("PROXY_API_KEY", raising=False)
-    monkeypatch.delenv("VLLM_UPSTREAM", raising=False)
     monkeypatch.setattr(secrets, "token_urlsafe", lambda length: secret)
     namespace = _settings()
     exec(compile(_code_cell("# 4."), "proxy-key-cell", "exec"), namespace)
@@ -409,27 +482,63 @@ def test_proxy_reads_key_at_runtime_and_streams_v1_routes(tmp_path, monkeypatch)
     upstream = _Upstream([b'data: {"choices":[]}\n\n', b"data: [DONE]\n\n"])
     module, proxy_source = _load_proxy(tmp_path, monkeypatch, [upstream])
     assert secret not in proxy_source
-    assert module._client.kwargs["base_url"] == "http://127.0.0.1:8001"
+    assert {p: c.kwargs["base_url"] for p, c in module._clients.items()} == {
+        "chat": "http://127.0.0.1:8001",
+        "embed": "http://127.0.0.1:8002",
+    }
+    sent_to = _record_upstream_hosts(module)
 
     async def exercise():
-        response = await module.proxy("v1/chat/completions", _authorized_request(secret))
+        response = await module.proxy("chat/v1/chat/completions", _bearer_request(secret))
         return b"".join([chunk async for chunk in response.body_iterator])
 
     body = asyncio.run(exercise())
     assert body == b'data: {"choices":[]}\n\ndata: [DONE]\n\n'
+    assert sent_to == ["http://127.0.0.1:8001"]
+    # 先頭の /chat は外して、vLLM には /v1/... として渡す
     assert upstream.request.path == "/v1/chat/completions"
-    assert "x-api-key" not in {k.lower() for k, _ in upstream.request.headers}
+    forwarded = {k.lower() for k, _ in upstream.request.headers}
+    assert "authorization" not in forwarded
+    assert "x-api-key" not in forwarded
     assert upstream.closed is True
 
 
-def test_proxy_upstream_overridable_by_env(tmp_path, monkeypatch):
+def test_proxy_routes_embed_to_the_embedding_vllm(tmp_path, monkeypatch):
     monkeypatch.setenv("PROXY_API_KEY", "test-runtime-key")
-    monkeypatch.setenv("VLLM_UPSTREAM", "http://127.0.0.1:9999")
-    module, _ = _load_proxy(tmp_path, monkeypatch, [])
-    assert module._client.kwargs["base_url"] == "http://127.0.0.1:9999"
+    upstream = _Upstream([b"{}"])
+    module, _ = _load_proxy(tmp_path, monkeypatch, [upstream])
+    sent_to = _record_upstream_hosts(module)
+
+    async def exercise():
+        response = await module.proxy("embed/v1/embeddings", _bearer_request("test-runtime-key"))
+        return response.status_code
+
+    assert asyncio.run(exercise()) == 200
+    assert sent_to == ["http://127.0.0.1:8002"]
+    assert upstream.request.path == "/v1/embeddings"
 
 
-def test_proxy_rejects_missing_and_invalid_keys_without_forwarding(tmp_path, monkeypatch):
+def test_vlm_profile_proxy_routes_only_vlm(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROXY_API_KEY", "test-runtime-key")
+    monkeypatch.chdir(tmp_path)
+    namespace = _settings()
+    namespace["VLLM_PROFILE"] = "vlm"
+    exec(compile(_code_cell("# 5."), "proxy-generator-cell", "exec"), namespace)
+    install_proxy_fakes(monkeypatch, [])
+    module = types.ModuleType("vllm_proxy")
+    exec(
+        compile((tmp_path / "vllm_proxy.py").read_text(encoding="utf-8"), "vllm_proxy.py", "exec"),
+        module.__dict__,
+    )
+
+    assert {p: c.kwargs["base_url"] for p, c in module._clients.items()} == {
+        "vlm": "http://127.0.0.1:8003"
+    }
+
+
+def test_proxy_rejects_missing_wrong_and_x_api_key_credentials_without_forwarding(
+    tmp_path, monkeypatch
+):
     secret = "test-runtime-key"
     monkeypatch.setenv("PROXY_API_KEY", secret)
     upstreams = []
@@ -446,15 +555,37 @@ def test_proxy_rejects_missing_and_invalid_keys_without_forwarding(tmp_path, mon
             raise AssertionError("unauthorized request body must not be read")
 
     async def exercise():
+        return [
+            await module.proxy("chat/v1/chat/completions", Request(headers))
+            for headers in (
+                {},
+                {"authorization": "Bearer incorrect-key"},
+                {"authorization": secret},
+                # 旧方式の X-API-Key は、キーが合っていても受け付けない
+                {"x-api-key": secret},
+            )
+        ]
+
+    responses = asyncio.run(exercise())
+    assert [r.status_code for r in responses] == [401, 401, 401, 401]
+    assert upstreams == []
+    assert secret not in json.dumps([r.body for r in responses])
+
+
+def test_proxy_returns_404_for_unknown_prefix_without_forwarding(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROXY_API_KEY", "test-runtime-key")
+    upstreams = []
+    module, _ = _load_proxy(tmp_path, monkeypatch, upstreams)
+
+    async def exercise():
         return (
-            await module.proxy("v1/chat/completions", Request({})),
-            await module.proxy("v1/models", Request({"x-api-key": "incorrect-key"})),
+            await module.proxy("vlm/v1/models", _bearer_request("test-runtime-key")),
+            await module.proxy("v1/models", _bearer_request("test-runtime-key")),
         )
 
-    missing, invalid = asyncio.run(exercise())
-    assert missing.status_code == invalid.status_code == 401
+    unknown, unprefixed = asyncio.run(exercise())
+    assert unknown.status_code == unprefixed.status_code == 404
     assert upstreams == []
-    assert secret not in json.dumps([missing.body, invalid.body])
 
 
 def test_proxy_maps_upstream_connection_and_timeout_errors(tmp_path, monkeypatch):
@@ -470,8 +601,8 @@ def test_proxy_maps_upstream_connection_and_timeout_errors(tmp_path, monkeypatch
 
     async def exercise():
         return (
-            await module.proxy("v1/chat/completions", _authorized_request("test-runtime-key")),
-            await module.proxy("v1/models", _authorized_request("test-runtime-key")),
+            await module.proxy("chat/v1/chat/completions", _bearer_request("test-runtime-key")),
+            await module.proxy("embed/v1/models", _bearer_request("test-runtime-key")),
         )
 
     timeout, connection = asyncio.run(exercise())
@@ -547,9 +678,9 @@ def test_measure_chat_reports_reasoning_content_and_speed(monkeypatch, capsys):
     result = namespace["speed_result"]
 
     url, kwargs = calls[0]
-    assert url == "http://127.0.0.1:8000/v1/chat/completions"
-    assert kwargs["headers"] == {"X-API-Key": "test-runtime-key"}
-    assert kwargs["json"]["model"] == "openai/gpt-oss-20b"
+    assert url == "http://127.0.0.1:8000/chat/v1/chat/completions"
+    assert kwargs["headers"] == {"Authorization": "Bearer test-runtime-key"}
+    assert kwargs["json"]["model"] == "gpt-oss-20b"
     assert kwargs["json"]["stream"] is True
     assert kwargs["json"]["stream_options"] == {"include_usage": True}
     assert kwargs["stream"] is True
@@ -579,3 +710,39 @@ def test_measure_chat_flags_reasoning_only_answer(monkeypatch, capsys):
 def test_measure_chat_raises_on_http_error(monkeypatch):
     with pytest.raises(Exception, match="401 Client Error"):
         _run_speed_cell(monkeypatch, [], http_error="401 Client Error: Unauthorized")
+
+
+def _run_env_cell(public_url, profile="chat+embed"):
+    namespace = _settings()
+    namespace["VLLM_PROFILE"] = profile
+    namespace["PROXY_API_KEY"] = "test-runtime-key"
+    namespace["public_url"] = public_url
+    exec(compile(_code_cell("# 9."), "env-cell", "exec"), namespace)
+
+
+def test_env_cell_prints_vllm_settings_for_chat_and_embed(capsys):
+    _run_env_cell("https://example.ngrok-free.app/")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "VLLM_CHAT_URL=https://example.ngrok-free.app/chat" in lines
+    assert "VLLM_CHAT_MODEL=gpt-oss-20b" in lines
+    assert "VLLM_EMBED_URL=https://example.ngrok-free.app/embed" in lines
+    assert "VLLM_EMBED_MODEL=bge-m3" in lines
+    assert "VLLM_API_KEY=test-runtime-key" in lines
+    assert not any(line.startswith("VLLM_VLM_") for line in lines)
+
+
+def test_env_cell_prints_only_vlm_settings_for_vlm_profile(capsys):
+    _run_env_cell("https://example.ngrok-free.app", profile="vlm")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "VLLM_VLM_URL=https://example.ngrok-free.app/vlm" in lines
+    assert "VLLM_VLM_MODEL=qwen3-vl-8b" in lines
+    assert not any(line.startswith(("VLLM_CHAT_", "VLLM_EMBED_")) for line in lines)
+
+
+def test_env_cell_does_not_write_any_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _run_env_cell("https://example.ngrok-free.app")
+
+    assert list(tmp_path.iterdir()) == []

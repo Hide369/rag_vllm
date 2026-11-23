@@ -137,7 +137,7 @@ def check_reranker() -> None:
     """モデルが手元にあるか確認する（無ければここでダウンロードする）。
 
     質問の途中で無言で止まるのを避けるため、UIで有効にした時点で呼ぶ。
-    embedder.check_ollama() / vlm.check_vlm() と同じ役割。
+    embedder.check_embedder() / vlm.check_vlm() と同じ役割。
     """
     try:
         _model_paths()

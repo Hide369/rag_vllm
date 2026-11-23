@@ -17,7 +17,7 @@ from pathlib import Path
 import docgen
 from docgen import filling, freeform, markdown_document, source_code
 from docgen import templates as docgen_templates
-from ingest import query_translation
+from ingest import query_translation, store
 from ingest.chat import ChatError
 from ingest.embedder import EmbeddingError
 from ingest.retrieval import DOCS_RERANK_FLOOR
@@ -208,8 +208,8 @@ def _collect_evidence(
                         rerank_floor=DOCS_RERANK_FLOOR,
                     ),
                 ))
-    except (EmbeddingError, ChatError) as error:
-        # 埋め込み（Ollama）も英訳（LLM）も、落ちたら伝えて止める。
+    except (EmbeddingError, ChatError, store.EmbeddingMismatchError) as error:
+        # 埋め込み（vLLM）も英訳（LLM）も、落ちたら伝えて止める。
         raise _Stop(str(error)) from error
 
     texts = []
@@ -276,9 +276,7 @@ def _generate_document(
     result = _empty_result()
 
     def ask(prompt: str) -> str:
-        return services.ask_json(
-            request.model, prompt, num_ctx=filling.GENERATION_NUM_CTX
-        )
+        return services.ask_json(request.model, prompt)
 
     sources, texts = _collect_evidence(request, services, corpora, result)
 
@@ -319,9 +317,7 @@ def _generate_freeform(
     suffix = request.output_suffix
 
     def ask_text(prompt: str) -> str:
-        return services.ask_text(
-            request.model, prompt, num_ctx=filling.GENERATION_NUM_CTX
-        )
+        return services.ask_text(request.model, prompt)
 
     sources, texts = _collect_evidence(request, services, corpora, result)
 
