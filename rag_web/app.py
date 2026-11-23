@@ -325,6 +325,14 @@ def create_app(
     def shared_busy(_request: Request, _error: SharedOperationBusy) -> JSONResponse:
         return JSONResponse({"detail": SHARED_BUSY_MESSAGE}, status_code=409)
 
+    @app.exception_handler(store.EmbeddingMismatchError)
+    def embedding_mismatch(
+        _request: Request, error: store.EmbeddingMismatchError
+    ) -> JSONResponse:
+        # 設定側の問題であり、サーバーの不具合ではない。利用者が次にすることを
+        # 書いた文言をそのまま見せる（500 の定型文にしない）。
+        return JSONResponse({"detail": str(error)}, status_code=503)
+
     def is_admin(request: Request) -> bool:
         return sessions.is_valid(request.cookies.get(COOKIE_NAME))
 

@@ -759,7 +759,12 @@ def main() -> int:
     print(f"vLLM 埋め込み: {settings.embed_url}（{settings.embed_model}）")
     print(f"vLLM 生成: {settings.chat_url}（{args.model}）")
     print(f"しきい値: {corpus.threshold}")
-    collection = store.open_store(str(db_path))
+    try:
+        collection = store.open_store(str(db_path))
+    except store.EmbeddingMismatchError as error:
+        # 別のモデルで測った距離は、しきい値の根拠にならない。
+        print(f"エラー: {error}", file=sys.stderr)
+        return 2
     indexed = collection.count()
     print(f"総チャンク数: {indexed}")
     if indexed == 0:

@@ -231,7 +231,9 @@ def _search(query: str, n_results: int) -> str:
             n_results=n_results,
             rerank=_ensure_reranker(),
         )
-    except EmbeddingError as error:
+    except (EmbeddingError, store.EmbeddingMismatchError) as error:
+        # EmbeddingMismatchError は DB と設定の埋め込みモデルの食い違い。
+        # 開く時点（_get_store）で出るので、ここで文言を返せば利用者に届く。
         # 文言をそのまま返す。embedder は「VLLM_EMBED_MODEL を確かめて
         # ください」のように、利用者が次に何をすればよいかを書いている。
         #

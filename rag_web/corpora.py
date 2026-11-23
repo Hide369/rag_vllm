@@ -6,8 +6,10 @@
 import threading
 from collections.abc import Callable
 
-from ingest import conditions
+from ingest import conditions, store
+from ingest.embedder import EMBED_DIM
 from ingest.reranker import RerankError
+from ingest.vllm_config import load_vllm_settings
 
 from .services import Services
 
@@ -32,11 +34,24 @@ class CorpusCache:
         return self._services.db_paths[corpus]  # 未知の corpus は KeyError
 
     def collection(self, corpus: str):
-        """DB はパスごとに1回だけ開く。"""
+        """DB はパスごとに1回だけ開く。
+
+        開いたときに、DB のベクトルを作った埋め込みモデルが設定と同じかを確かめる。
+        食い違っていれば EmbeddingMismatchError で止め、キャッシュには入れない
+        （設定を直せば、次のリクエストで開き直せる）。
+        """
         db_path = self._db_path(corpus)
         with self._lock:
             if corpus not in self._collections:
-                self._collections[corpus] = self._services.open_store(db_path)
+                collection = self._services.open_store(db_path)
+                try:
+                    store.ensure_embedding_model(
+                        collection, load_vllm_settings().embed_model, EMBED_DIM
+                    )
+                except Exception:
+                    collection.close()
+                    raise
+                self._collections[corpus] = collection
             return self._collections[corpus]
 
     def _cached(self, cache: dict, corpus: str, build: Callable):

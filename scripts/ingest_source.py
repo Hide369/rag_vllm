@@ -384,7 +384,12 @@ def main() -> int:
     # 表示上は同じ文字列になり、この安全策自体が意味を失う。解決済みの
     # 絶対パスを出す。
     print(f"取り込み先: {args.db.resolve()}")
-    collection = store.open_store(str(args.db))
+    try:
+        collection = store.open_store(str(args.db))
+    except store.EmbeddingMismatchError as error:
+        # 別のモデルのベクトルを混ぜると、距離が黙って狂う。取り込む前に止める。
+        print(f"エラー: {error}")
+        return 2
     report = ingest_directory(
         args.source_dir,
         collection,

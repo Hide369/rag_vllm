@@ -122,3 +122,71 @@ def test_all_documents_returns_ids_and_texts_in_the_same_order(collection):
 
 def test_all_documents_on_an_empty_collection_returns_two_empty_lists(collection):
     assert store.all_documents(collection) == ([], [])
+
+
+# --- 埋め込みモデルの記録（設計書: DB に作ったモデルを残し、食い違えば止める） ---------
+
+
+def test_an_unrecorded_store_is_treated_as_bge_m3_1024(collection):
+    store.ensure_embedding_model(collection, "bge-m3", 1024)
+    with pytest.raises(store.EmbeddingMismatchError) as raised:
+        store.ensure_embedding_model(collection, "qwen3-embedding", 2560)
+    assert "bge-m3" in str(raised.value)
+    assert "qwen3-embedding" in str(raised.value)
+
+
+def test_a_different_dimension_stops_even_with_the_same_name(collection):
+    with pytest.raises(store.EmbeddingMismatchError):
+        store.ensure_embedding_model(collection, "bge-m3", 768)
+
+
+def test_an_org_prefix_and_case_do_not_make_a_different_model(collection):
+    collection.set_meta_if_absent("embedding_model", "BAAI/bge-m3")
+    collection.set_meta_if_absent("embedding_dim", "1024")
+    store.ensure_embedding_model(collection, "bge-m3", 1024)
+    store.ensure_embedding_model(collection, "BGE-M3", 1024)
+
+
+def test_a_recorded_other_model_stops_the_default(collection):
+    collection.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    collection.set_meta_if_absent("embedding_dim", "2560")
+    with pytest.raises(store.EmbeddingMismatchError):
+        store.ensure_embedding_model(collection, "bge-m3", 1024)
+
+
+def test_the_first_write_records_the_model_and_the_second_does_not_overwrite(
+    collection, monkeypatch
+):
+    monkeypatch.setenv("VLLM_EMBED_MODEL", "BAAI/bge-m3")
+    _add(collection, "a.md", "h1")
+    assert collection.get_meta("embedding_model") == "BAAI/bge-m3"
+    assert collection.get_meta("embedding_dim") == str(EMBED_DIM)
+
+    monkeypatch.setenv("VLLM_EMBED_MODEL", "bge-m3")  # 同じモデルの別表記
+    _add(collection, "b.md", "h2")
+    assert collection.get_meta("embedding_model") == "BAAI/bge-m3"
+
+
+def test_a_write_with_a_mismatched_setting_is_refused_before_anything_is_written(
+    collection, monkeypatch
+):
+    collection.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    collection.set_meta_if_absent("embedding_dim", "2560")
+    with pytest.raises(store.EmbeddingMismatchError):
+        _add(collection, "a.md", "h1")
+    assert collection.count() == 0
+
+
+def test_deleting_from_an_empty_store_records_nothing(collection):
+    replace_source(collection, "a.md", [], [])
+    assert collection.get_meta("embedding_model") is None
+
+
+def test_open_store_stops_a_mismatched_db_and_closes_it(tmp_path, monkeypatch):
+    path = str(tmp_path / "s.sqlite3")
+    first = store.vector_store.open_store(path)
+    first.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    first.set_meta_if_absent("embedding_dim", "2560")
+    first.close()
+    with pytest.raises(store.EmbeddingMismatchError):
+        open_store(path)

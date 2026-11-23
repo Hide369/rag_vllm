@@ -458,6 +458,42 @@ class VectorStore:
                 "SELECT value FROM meta WHERE key = 'revision'"
             ).fetchone()[0]
 
+    def get_meta(self, key: str) -> str | None:
+        """meta の値を文字列で返す。無ければ None。
+
+        value 列は INTEGER 型のため、"1024" のような数字だけの文字列は整数で
+        保存され、整数で返ってくる。呼び出し側が型の違いで食い違わないよう、
+        読み出しで文字列に戻す。
+        """
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_meta_if_absent(self, key: str, value: str) -> None:
+        """記録が無いときだけ書く。上書きしない。
+
+        埋め込みモデルの記録は「このDBが何で作られたか」の事実であり、後から
+        設定を変えた別のプロセスが書き換えてはならない。書き換えると、食い違いの
+        検出が自分で自分を無効にする。
+        """
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (key, value)
+            )
+
+    def sample_embeddings(self, limit: int) -> list[tuple[str, np.ndarray]]:
+        """本文と、保存済みの（正規化済みの）ベクトルの組を、IDの順に limit 件返す。
+
+        ID は本文の SHA-256 なので、並びは取り込み順に左右されず再現できる。
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT text, embedding FROM chunks ORDER BY id LIMIT ?", (limit,)
+            ).fetchall()
+        return [(text, np.frombuffer(blob, dtype="float32")) for text, blob in rows]
+
     def _current(self):
         """世代が変わっていれば読み直す。変わっていなければキャッシュを返す。
 

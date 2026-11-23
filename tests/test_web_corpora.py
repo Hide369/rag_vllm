@@ -222,3 +222,21 @@ def test_caption_image_or_reason_returns_captioner_when_available(services):
     caption, reason = caption_image_or_reason(replace(services, check_vlm=lambda: None))
     assert caption is services.caption_image
     assert reason is None
+
+
+def test_collection_refuses_a_db_built_with_another_embedding_model(
+    services, recorder, tmp_path
+):
+    """画面の検索も、読むだけで開く入口である。食い違いのまま開くと、検索語の
+    ベクトルだけが別のモデルになり、距離が静かに狂う。"""
+    seed = vector_store.open_store(services.db_paths["internal"])
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+
+    cache = CorpusCache(services)
+    with pytest.raises(store.EmbeddingMismatchError) as raised:
+        cache.collection("internal")
+
+    assert "qwen3-embedding" in str(raised.value)
+    assert "VLLM_EMBED_MODEL" in str(raised.value)

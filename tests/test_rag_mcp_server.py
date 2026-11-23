@@ -585,3 +585,22 @@ def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(monkeypatch, cap
     err = capsys.readouterr().err
     assert "OLLAMA_HOST" in err
     assert "VLLM_" in err
+
+
+def test_a_mismatched_db_returns_the_reason_to_the_user(monkeypatch, tmp_path):
+    """MCP サーバーは読むだけで DB を開く。食い違いのまま検索すると別モデルの
+    ベクトルと比べて距離が狂うので、開く時点で止め、理由をそのまま返す。"""
+    from ingest import store, vector_store
+
+    path = tmp_path / "vector_store.sqlite3"
+    seed = vector_store.open_store(str(path))
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+    monkeypatch.setattr(store, "DB_PATH", path)
+
+    answer = rag_mcp_server.search_documents("質問")
+
+    assert "qwen3-embedding" in answer
+    assert "VLLM_EMBED_MODEL" in answer
+    assert rag_mcp_server._state.store is None, "食い違ったDBを開いたまま抱えている"

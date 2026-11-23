@@ -380,6 +380,33 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     assert client.get("/api/status", params={"corpus": "other"}).status_code == 422
 
 
+def _record_other_embedding_model(path):
+    seed = vector_store.open_store(path)
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+
+
+def test_a_mismatched_db_shows_a_readable_message_not_a_500(client, fake):
+    """設定側の食い違いは利用者が直せる。内部エラーの定型文にしない。"""
+    _record_other_embedding_model(fake.db_paths["internal"])
+
+    response = client.get("/api/status", params={"corpus": "internal"})
+
+    assert response.status_code == 503
+    assert "qwen3-embedding" in response.json()["detail"]
+    assert "VLLM_EMBED_MODEL" in response.json()["detail"]
+
+
+def test_a_mismatched_db_reaches_the_chat_screen_as_an_error_event(client, fake):
+    _record_other_embedding_model(fake.db_paths["internal"])
+
+    text = client.post("/api/chat", json=_chat_body(), headers=CSRF).text
+
+    assert "qwen3-embedding" in text
+    assert '"type": "error"' in text
+
+
 def test_status_of_an_empty_docs_corpus_carries_the_ingest_command(client):
     """技術ドキュメントが0件のとき、画面が警告に出す取り込みコマンドを status が返す。
 

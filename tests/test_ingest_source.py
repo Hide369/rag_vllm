@@ -878,3 +878,28 @@ def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(tmp_path, monkey
     err = capsys.readouterr().err
     assert "OLLAMA_HOST" in err
     assert "VLLM_" in err
+
+
+def test_main_stops_before_ingesting_into_a_db_built_with_another_model(
+    monkeypatch, tmp_path, capsys
+):
+    """別のモデルのベクトルを混ぜると、距離が黙って狂う。取り込む前に止める。"""
+    from ingest import vector_store
+
+    db = tmp_path / "s.sqlite3"
+    seed = vector_store.open_store(str(db))
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+    called = []
+    monkeypatch.setattr(
+        ingest_source, "ingest_directory", lambda *a, **k: called.append(1)
+    )
+    monkeypatch.setattr(ingest_source.embedder, "check_embedder", lambda: None)
+    monkeypatch.setattr(
+        sys, "argv", ["ingest_source", "--source-dir", str(tmp_path), "--db", str(db)]
+    )
+
+    assert ingest_source.main() == 2
+    assert "qwen3-embedding" in capsys.readouterr().out
+    assert called == []

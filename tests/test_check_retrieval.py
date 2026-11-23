@@ -213,3 +213,19 @@ def test_main_stops_with_exit_code_2_on_a_legacy_ollama_setting(monkeypatch, tmp
     err = capsys.readouterr().err
     assert "OLLAMA_HOST" in err
     assert "VLLM_" in err
+
+
+def test_a_db_built_with_another_model_stops_main(monkeypatch, tmp_path, capsys):
+    """別のモデルで測った距離は、しきい値の根拠にならない。"""
+    from ingest import vector_store
+
+    db = tmp_path / "s.sqlite3"
+    seed = vector_store.open_store(str(db))
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+    monkeypatch.setattr(check_retrieval.embedder, "check_embedder", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["check_retrieval", "--db", str(db)])
+
+    assert check_retrieval.main() == 2
+    assert "qwen3-embedding" in capsys.readouterr().err
