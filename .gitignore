@@ -50,7 +50,11 @@ source_archive/
 
 # サブエージェント駆動開発の作業ディレクトリ（台帳・レビュー資材）
 .superpowers/
-.worktrees/
+
+# Hugging Face のキャッシュ。GB10 ではリポジトリの複製 /opt/rag が rag ユーザーの
+# ホームを兼ねるので、リランカーのモデルが /opt/rag/.cache/huggingface に入る
+# （docs/server-deployment.md 手順 4）
+.cache/
 
 # Colab用エージェントが作るマシン固有のスキル参照
 .agents/skills/*
