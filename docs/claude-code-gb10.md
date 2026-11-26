@@ -283,6 +283,7 @@ GB10 は vLLM に替わり、vLLM が `/v1/messages` を直接話すため、こ
 ## 関連
 
 - [GB10 への配置手順](server-deployment.md)
+- [Windows の検索サーバ（Ollama 版）から GB10 への移行手順](mcp/windows-to-gb10-migration.md)（11434 番の `local_docs` から付け替えるクライアント向けの差分もここにある）
 - [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md)
 - [技術ドキュメントDBを MCP から検索する設計書](superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md)
 - [Claude Code 環境変数リファレンス](https://code.claude.com/docs/en/env-vars)

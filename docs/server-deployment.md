@@ -5,6 +5,8 @@ RAG の画面（`rag_web/`）、社内資料と技術ドキュメントの検索
 [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md) にある。
 MCP の技術ドキュメント検索（`search_tech_docs`、context7 の置き換え）の設計は
 [技術ドキュメントDBを MCP から検索する設計書](superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md) にある。
+Windows の検索サーバ（Ollama 版）から DB を持ち込んで移す場合は、本書だけで進めず
+[Windows から GB10 への移行手順](mcp/windows-to-gb10-migration.md) に従う（本書の手順を途中で区切って使う）。
 
 > **実測はしていない。** GB10 の実機はまだ使えず、この手順と `deploy/gb10/` の設定は
 > 一度も実機で動かしていない。確かめた範囲は次の2つだけである。
@@ -363,6 +365,7 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/llm/metrics            
 
 ## 関連
 
+- [Windows の検索サーバ（Ollama 版）から GB10 への移行手順](mcp/windows-to-gb10-migration.md)
 - [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md)
 - [技術ドキュメントDBを MCP から検索する設計書](superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md)
 - [Claude Code から GB10 を使う](claude-code-gb10.md)
