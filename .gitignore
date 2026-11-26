@@ -53,8 +53,9 @@ source_archive/
 
 # Hugging Face のキャッシュ。GB10 ではリポジトリの複製 /opt/rag が rag ユーザーの
 # ホームを兼ねるので、リランカーのモデルが /opt/rag/.cache/huggingface に入る
-# （docs/server-deployment.md 手順 4）
-.cache/
+# （docs/server-deployment.md 手順 4）。ルート直下だけを除く（先頭の / が無いと
+# どの階層の .cache/ も無視されてしまう）
+/.cache/
 
 # Colab用エージェントが作るマシン固有のスキル参照
 .agents/skills/*
