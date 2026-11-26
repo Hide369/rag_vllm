@@ -1,4 +1,4 @@
-"""Codex から社内資料を引く stdio MCP サーバ。
+"""社内資料と技術ドキュメントを引く MCP サーバ（既定は stdio、GB10 では --http で常駐）。
 
 取り込み済みのDBを検索し、根拠となる原文をそのまま返す。回答文を作らないのは、
 コーディングエージェントに要るのが判断済みの答えではなく、コードや設定へ統合
@@ -280,6 +280,12 @@ _reranker_ready = False
 # リランカー、2026-09-08 の実測）なので、3人が同時に叩けば最後の1人は
 # 約10秒待つ。少人数を前提にした割り切りであり、常時の同時利用が増えるなら
 # 直列化ではなく読み取り側の作り直しが要る。
+#
+# 技術ドキュメントは索引の組み立てが重い。サーバ起動後の最初の search_tech_docs と、
+# 取り込みで revision が変わった直後の1回は、BM25索引の構築だけで約4.8秒この
+# ロックを握る（2026-11-26、開発機、docs_store 60,914チャンクの実測）。その間は
+# search_documents も待たされる。まれなので起動時の先読みはしていない。困るほど
+# 効いてきたら、起動時に _docs_state の索引を組んでおく。
 _search_lock = threading.Lock()
 
 
@@ -439,7 +445,7 @@ def main(argv=None) -> None:
     --http は別のPCから引くための構成である。SDK の既定 host は 127.0.0.1 で
     他のPCから届かないため、--host で明示的に開ける必要がある。
     """
-    parser = argparse.ArgumentParser(description="社内資料を引く MCP サーバ")
+    parser = argparse.ArgumentParser(description="社内資料と技術ドキュメントを引く MCP サーバ")
     parser.add_argument(
         "--http",
         action="store_true",
