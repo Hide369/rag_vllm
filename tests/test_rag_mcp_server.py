@@ -915,7 +915,7 @@ def test_a_japanese_query_is_not_searched(monkeypatch, query):
     [
         "How do I cache data in Streamlit？",
         "How do I use pymupdf！",
-        "How　do I cache data in Streamlit?",
+        "How\u3000do I cache data in Streamlit?",
     ],
 )
 def test_full_width_punctuation_is_not_treated_as_japanese(monkeypatch, query):
