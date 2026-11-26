@@ -117,7 +117,7 @@ VS Code の拡張機能の Claude Code も入れる。**この時点ではまだ
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` | 本筋以外の外部通信を止める。社内で閉じる構成では付ける |
 | `ENABLE_TOOL_SEARCH: "false"` | MCP のツール定義を最初の要求から全部モデルに渡す。下の「MCP tool search について」 |
 | `permissions.allow` | 検索のたびに許可を求めるダイアログを出さない。2つとも読み取りだけなので許可してよい |
-| `permissions.deny` の `mcp__context7__*` | context7 を誰かが登録し直しても呼ばせない。ライブラリを調べる検索語を社外に出さないための保険（手順4で登録も外す） |
+| `permissions.deny` の `mcp__context7__*` | context7 を誰かが登録し直しても呼ばせない。ライブラリを調べる検索語を社外に出さないための保険（手順4で登録も外す）。**プラグインとして入れた context7 には効かない**（手順4） |
 
 - **`ANTHROPIC_API_KEY` は設定しない。** `ANTHROPIC_AUTH_TOKEN` より優先され、どちらの認証が
   効いているか分からなくなる。
@@ -163,6 +163,13 @@ context7 を登録していれば外す。ライブラリを調べる先は `sea
 ```powershell
 claude mcp remove context7 --scope user
 ```
+
+**プラグインとして入れた context7 はこのコマンドでは外れず、手順3の `mcp__context7__*` の
+拒否も効かない。** プラグインが持つ MCP サーバは `mcp__plugin_<プラグイン名>_<サーバ名>__…` の
+名前になるためである。`/mcp` の一覧に context7 を含む名前が残っていないかを見て、
+プラグインなら `/plugin` で無効にする。あわせて、その一覧に出た名前で `permissions.deny` に
+`mcp__plugin_<プラグイン名>_<サーバ名>__*` を足す（名前は版によって変わりうるので、推測で
+書かず一覧から写す）。
 
 ### `CLAUDE.md` に、いつ検索するかを書く
 
@@ -259,7 +266,7 @@ Ollama 版（Hide369/local-llm-rag の `docs/mcp/mcp-server-11434-claude-code.md
 | 設定が効かない | VS Code を再起動していない、JSON の構文エラー、拡張が env を読まない | 完全に再起動。Settings Error を見る。確認項目の1つ目 |
 | Anthropic へのログインを求められる | `settings.json` の場所か綴りが違う | `%USERPROFILE%\.claude\settings.json` であること |
 | ツール名を挙げても `search_documents` / `search_tech_docs` が一度も呼ばれない | ツールの定義がモデルに届いていない | `ENABLE_TOOL_SEARCH` が `false` か、VS Code を完全に再起動したか（上の「MCP tool search について」） |
-| `search_tech_docs` が「技術ドキュメントのDBが空です」 | GB10 に技術DBが無い | [server-deployment.md](server-deployment.md) 手順6「技術ドキュメントDBを置く」 |
+| `search_tech_docs` が「技術ドキュメントのDBが空です」 | GB10 に技術DBが無い。置いたのに出るなら、MCP サーバが置く前の空のDBを抱えている | [server-deployment.md](server-deployment.md) 手順6「技術ドキュメントDBを置く」。置いたあとなら `sudo systemctl restart rag-mcp` |
 | `search_tech_docs` が「この DB は … で作られています」 | 技術DBの埋め込みモデルが `VLLM_EMBED_MODEL` と違う | [server-deployment.md](server-deployment.md)「既存の DB を持ち込むとき」 |
 | `search_tech_docs` の結果が話題とずれる・件数が多すぎる | リランカーが使えず、関連の薄い結果を落とせていない | [server-deployment.md](server-deployment.md) 手順4の2行目（オフラインの確認）が `ok` になるか |
 | 「英語の疑問文に書き直して」が返り続ける | モデルが日本語のまま呼び直している | `CLAUDE.md` に「検索語は英語の疑問文で書く」の行があるか（手順4） |

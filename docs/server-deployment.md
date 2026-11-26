@@ -265,13 +265,22 @@ MCP の `search_tech_docs`（Claude Code がライブラリの API を調べる�
 
 - 開発機で作ったものを持ち込むなら、[技術ドキュメントDBの移植手順.md](技術ドキュメントDBの移植手順.md)
   に従って `/opt/rag` に置き、上の `check_embedding_compat --db docs_store.sqlite3` を通す。
+  **ファイルを置き換える前に `sudo systemctl stop rag-web rag-mcp` で止め、置いてから
+  `start` する。** 起動中の MCP サーバは、一度でも `search_tech_docs` が呼ばれていれば
+  そのとき開いたDB（無ければ空のDBが作られる）をプロセスの生存期間ずっと抱える。止めずに
+  `mv`・`rsync` で差し替えると古い空のDBを引き続け、`cp` で上書きすると開いたままの
+  ファイルを壊しうる。
 - GB10 で作るなら、`docs_source/`（git で追跡済み）から取り込む。取得（`fetch_docs`）は
   外へ出るので、オフラインの GB10 では行わない。
   `sudo -u rag bash -c 'set -a; . /etc/rag/rag.env; set +a; cd /opt/rag && ./rag_env/bin/python -m scripts.ingest_source --source-dir docs_source --db docs_store.sqlite3 --keep-code-blocks'`
 - 置いていないと、`search_tech_docs` は「技術ドキュメントのDBが空です」を返す。
   埋め込みモデルが `VLLM_EMBED_MODEL` と食い違っていれば「この DB は … で作られています」を返す。
-  どちらも MCP サーバの再起動は要らない（DBを置き直せば次の検索から効く。
-  食い違ったDBは開いたまま抱えない）。
+  再起動が要るかは直し方で決まる。
+  - 食い違いのDBを置き直す場合は、食い違ったDBを開いたまま抱えないので、次の検索から効く。
+    ただし置き直すのがファイルのコピーなら、上の箇条のとおり止めてから置く。
+  - GB10 上で `ingest_source` を走らせて入れる場合は、同じファイルへ SQLite 越しに書き込み、
+    MCP サーバは revision の変化を見て索引を組み直すので、再起動は要らない。
+  - 空のDBを抱えた状態から、ファイルのコピーで入れる場合は、止めてから置く（上の箇条）。
 
 ## 7. Nginx を置く
 
