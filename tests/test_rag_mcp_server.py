@@ -877,3 +877,130 @@ def test_the_two_tools_never_search_at_the_same_time(monkeypatch):
         one.join()
 
     assert max(peak) == 1, f"検索が同時に走っている（最大 {max(peak)} 本）"
+
+
+# --- search_tech_docs の入口と説明文（設計書4.3・4.5） ------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "きゃっしゅ",
+        "キャッシュ",
+        "設定",
+        "ｷｬｯｼｭ",
+        "How do I use 設定 in Streamlit?",
+    ],
+)
+def test_a_japanese_query_is_not_searched(monkeypatch, query):
+    """日本語を含む検索語は検索せず、英語で呼び直させる。
+
+    技術ドキュメントは英語で、日本語のまま検索するとほぼ確実にリランカーの床で
+    全件落ちる。0件の文言は「再検索しない」と言うので、そのまま返すとモデルは
+    「資料に無い」と結論して呼び直す機会を失う。
+    """
+    calls = []
+    _wire(monkeypatch, lambda *a, **k: calls.append(1) or [])
+
+    text = rag_mcp_server.search_tech_docs(query)
+
+    assert calls == [], "日本語の検索語で検索している"
+    assert "英語" in text
+    assert "search_tech_docs" in text
+    assert "見つかりませんでした" not in text
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "How do I cache data in Streamlit？",
+        "How do I use pymupdf！",
+        "How　do I cache data in Streamlit?",
+    ],
+)
+def test_full_width_punctuation_is_not_treated_as_japanese(monkeypatch, query):
+    """全角の記号・空白だけなら日本語とみなさない。
+
+    IME で「？」や全角スペースが混ざるのはよくある。はねると、モデルは同じ
+    検索語で呼び直し続ける。
+    """
+    calls = []
+    _wire(monkeypatch, lambda *a, **k: calls.append(1) or [])
+
+    rag_mcp_server.search_tech_docs(query)
+
+    assert calls == [1]
+
+
+def test_a_japanese_query_does_not_wait_for_a_running_search(monkeypatch):
+    """はね返すだけの応答は、他の人の検索が終わるのを待たない。
+
+    検索1回は数秒かかり、複数人が並べば十数秒になる。検索しない応答を
+    その列に並べる理由が無い。
+    """
+    import threading
+
+    _wire(monkeypatch, lambda *a, **k: [])
+    result = {}
+
+    def call():
+        result["text"] = rag_mcp_server.search_tech_docs("キャッシュ")
+
+    rag_mcp_server._search_lock.acquire()
+    try:
+        thread = threading.Thread(target=call)
+        thread.start()
+        thread.join(timeout=1)
+        assert not thread.is_alive(), "日本語の検索語なのにロック待ちになっている"
+    finally:
+        rag_mcp_server._search_lock.release()
+    thread.join()
+    assert "英語" in result["text"]
+
+
+def test_the_description_lists_each_library():
+    """説明文に収録ライブラリと版を並べる。版の記載が無いものは名前だけ。
+
+    モデルは一覧に無いライブラリについて呼ばずに済む。版を並べるのは、
+    モデルの知識と収録している版が違いうることを読ませるため。
+    """
+    from types import SimpleNamespace
+
+    description = rag_mcp_server._tech_docs_description([
+        SimpleNamespace(name="streamlit", version="1.61.1"),
+        SimpleNamespace(name="ollama", version="0.0.0"),
+    ])
+
+    assert "streamlit 1.61.1" in description
+    assert "ollama" in description
+    assert "0.0.0" not in description
+    assert "How do I cache data in Streamlit?" in description
+    assert "search_documents" in description
+
+
+def test_the_registered_tool_lists_the_configured_libraries():
+    """登録されたツールの説明文が docs_sources.toml の全ライブラリを含む。
+
+    説明文を組む関数があっても、登録に渡し忘れれば docstring のままになり、
+    モデルは収録範囲を知らずに呼ぶ。
+    """
+    import asyncio
+
+    from scripts.fetch_docs import load_sources
+
+    tools = {tool.name: tool for tool in asyncio.run(rag_mcp_server.mcp.list_tools())}
+    description = tools["search_tech_docs"].description
+
+    for source in load_sources():
+        assert source.name in description, source.name
+
+
+def test_search_documents_keeps_its_description():
+    """社内資料のツールの説明文は変えない。技術DBの話を混ぜない。"""
+    import asyncio
+
+    tools = {tool.name: tool for tool in asyncio.run(rag_mcp_server.mcp.list_tools())}
+    description = tools["search_documents"].description
+
+    assert description.startswith("社内資料を検索し、根拠となる原文を出典つきで返す。")
+    assert "技術ドキュメント" not in description

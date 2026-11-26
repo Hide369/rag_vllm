@@ -15,6 +15,7 @@ _Corpus の値（DB・リランカーの床・文言）にまとめてある
 （docs/superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md）。
 """
 import argparse
+import re
 import sys
 import threading
 from collections.abc import Callable
@@ -32,6 +33,7 @@ from ingest.retrieval import (
     search,
 )
 from ingest.vllm_config import load_vllm_settings, reject_legacy_env
+from scripts.fetch_docs import load_sources
 
 # 根拠が無いときの出口。0件でも「ヒットしたが無関係」でも、エージェントが取る
 # べき道は同じなので、文面を1か所に持って両方から使う。
@@ -126,6 +128,46 @@ _DOCS_EMPTY_STORE = (
     "技術ドキュメントのDBが空です。取り込みが未実行の可能性があります。"
     f"{store.DOCS_INGEST_SOURCE_COMMAND} を実行してください。"
 )
+
+
+# 日本語の検索語を見分ける。ひらがな・カタカナ・CJK統合漢字（拡張Aを含む）・
+# 半角カタカナ。全角スペース・句読点（U+3000-303F）と全角英数・記号
+# （U+FF01-FF5E）は含めない。IME で「？」が混ざった英語の検索語までは
+# ねると、モデルは同じ語で呼び直し続ける。
+_JAPANESE = re.compile("[぀-ゟ゠-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
+
+# 日本語の検索語をはね返すときの文言。0件の文言（_DOCS_NO_HITS）とは混ぜない。
+# あちらは「再検索しない」と言うので、混ぜるとモデルは呼び直さなくなる。
+_ASK_FOR_ENGLISH = (
+    "検索していません。技術ドキュメントは英語で書かれているため、日本語を含む"
+    "検索語では当たりません。検索語を英語の疑問文に書き直して、もう一度 "
+    "search_tech_docs を呼んでください（例: How do I cache data in Streamlit?）。"
+)
+
+
+def _tech_docs_description(sources: list) -> str:
+    """search_tech_docs の説明文を組む（設計書4.3〜4.5）。
+
+    収録ライブラリは docs_sources.toml（唯一の設定）から並べる。DBを開いて
+    調べないのは、開く操作が書き込みを伴うため（_get_store の説明）。
+    version が "0.0.0" のものは版の記載が無い資料なので、名前だけを出す。
+    """
+    libraries = ", ".join(
+        source.name if source.version == "0.0.0" else f"{source.name} {source.version}"
+        for source in sources
+    )
+    return (
+        "OSS ライブラリ・言語仕様の公式ドキュメント（英語）を検索し、根拠となる"
+        "原文を出典つきで返す。社内資料はこのツールではなく search_documents で"
+        "検索する。\n\n"
+        f"収録しているライブラリ: {libraries}\n"
+        "この一覧に無いライブラリについては呼ばなくてよい。\n\n"
+        "query は英語の疑問文で書く。"
+        "良い例: How do I cache data in Streamlit?　"
+        "悪い例: Streamlit キャッシュ（日本語）、Write a caching function（依頼文。"
+        "関連度の判定で落ちる）。\n"
+        "日本語を含む query は検索せずに、英語での呼び直しを求める文を返す。"
+    )
 
 
 @dataclass(frozen=True)
@@ -315,14 +357,22 @@ def search_documents(query: str, n_results: int = SEARCH_RESULT_COUNT) -> str:
         return _search(_INTERNAL, _state, _open, query, n_results)
 
 
-@mcp.tool()
+# 説明文は起動時に1回だけ組む。docs_sources.toml が読めなければ例外のまま
+# 起動を止める。握りつぶして一覧の無い説明文で起動すると、モデルは収録範囲が
+# 分からないまま呼び続ける（rag-mcp.service の journalctl に例外が残る）。
+@mcp.tool(description=_tech_docs_description(load_sources()))
 def search_tech_docs(query: str, n_results: int = SEARCH_RESULT_COUNT) -> str:
     """OSS ライブラリ・言語仕様の公式ドキュメントを検索し、原文を出典つきで返す。
+
+    モデルに見せる説明文は docstring ではなく _tech_docs_description が組む。
 
     Args:
         query: 英語の疑問文で書く。
         n_results: 返すチャンク数。
     """
+    # ロックを取る前にはね返す。検索しない応答を、他の人の検索の列に並べない。
+    if _JAPANESE.search(query):
+        return _ASK_FOR_ENGLISH
     with _search_lock:
         return _search(_TECH_DOCS, _docs_state, _open_docs, query, n_results)
 
