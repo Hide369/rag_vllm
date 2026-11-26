@@ -8,10 +8,16 @@
 ストアはプロセスの生存期間で1度だけ開く。開く操作は読み取りではないため
 （_get_store の説明を参照）、取り込み中の検索が待たされる可能性は
 「サーバの生存期間に最大1回」まで減らせるが、ゼロにはならない（設計書5節）。
+
+ツールは2つある。社内資料の search_documents と、技術ドキュメント
+（docs_store.sqlite3）の search_tech_docs である。検索の本体は共通で、違いは
+_Corpus の値（DB・リランカーの床・文言）にまとめてある
+（docs/superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md）。
 """
 import argparse
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from mcp.server import MCPServer
@@ -19,7 +25,12 @@ from mcp.server import MCPServer
 from ingest import reranker, store
 from ingest.embedder import EmbeddingError
 from ingest.prompting import format_hit_caption
-from ingest.retrieval import SEARCH_RESULT_COUNT, build_index, search
+from ingest.retrieval import (
+    DOCS_RERANK_FLOOR,
+    SEARCH_RESULT_COUNT,
+    build_index,
+    search,
+)
 from ingest.vllm_config import load_vllm_settings, reject_legacy_env
 
 # 根拠が無いときの出口。0件でも「ヒットしたが無関係」でも、エージェントが取る
@@ -73,8 +84,86 @@ _CAUTION = (
     + _FALLBACK
 )
 
+# 社内資料のDBが空のとき。取り込み忘れを「関連する記述が無い」と取り違えさせない。
+# 取り込みを忘れている利用者は、質問を言い換え続けても永遠に0件を得る（設計書7節）。
+_EMPTY_STORE = (
+    "ベクトルDBが空です。取り込みが未実行の可能性があります。"
+    "python -m scripts.ingest_source を実行してください。"
+)
 
-def format_results(hits: list) -> str:
+# 技術ドキュメントの出口。社内資料の _FALLBACK と同じ型で、一般知識で答えて
+# よいことを先に言い、補う探索を名指しで止める（_FALLBACK の 2026-09-09 の
+# ウェブ検索ループと同じ理由）。名指しする相手に context7 を加えるのは、この
+# ツールが検索語を社外に出さないために context7 を置き換えるものだからである。
+#
+# 社内固有の事項の歯止めは持たない。ライブラリの質問に「社内固有の事項は推測
+# しない」を付けると、社内の話として扱われて一般知識の線引きが狂う。代わりに、
+# 版によって変わる記述（引数名・既定値・非推奨）を推測と断らせる。収録している
+# のは特定の版の公式ドキュメントであり、モデルの知識は別の版のものでありうる。
+_DOCS_FALLBACK = (
+    "context7・ウェブ検索・他のツールで補おうとせず、次のとおり回答してください。"
+    "一般的な知識で答えて構いませんが、技術ドキュメントDBでは確認できなかった"
+    "旨を断ってください。"
+    "バージョンによって変わる記述（引数名・既定値・非推奨かどうかなど）は、"
+    "推測であることを明示してください。"
+)
+
+_DOCS_NO_HITS = (
+    "技術ドキュメントを検索しましたが、この質問に関連する記述は見つかりませんでした。\n"
+    + _DOCS_FALLBACK
+)
+
+_DOCS_CAUTION = (
+    "---\n"
+    "上記は検索結果です。質問に関連しない場合は根拠に使わず、"
+    "下記のとおり扱ってください。\n"
+    + _DOCS_FALLBACK
+)
+
+# 技術DBが空のとき。fetch_docs は示さない。オフラインの GB10 では走らせられず、
+# docs_source/ は git で追跡済みなので取得し直す必要も無い。
+_DOCS_EMPTY_STORE = (
+    "技術ドキュメントのDBが空です。取り込みが未実行の可能性があります。"
+    f"{store.DOCS_INGEST_SOURCE_COMMAND} を実行してください。"
+)
+
+
+@dataclass(frozen=True)
+class _Corpus:
+    """コーパスごとに違うもの。検索の本体（_search）はこれだけを見て分岐する。
+
+    DBを開く関数はここに持たせない。テストが rag_mcp_server._open を差し替える
+    ため、import 時に関数を束縛すると差し替えが効かなくなる。開く関数は
+    ツールの入口が呼び出し時にモジュールから引いて渡す。
+    """
+
+    label: str
+    rerank_floor: float | None
+    no_hits: str
+    caution: str
+    empty_store: str
+
+
+_INTERNAL = _Corpus(
+    label="社内資料",
+    rerank_floor=None,
+    no_hits=_NO_HITS,
+    caution=_CAUTION,
+    empty_store=_EMPTY_STORE,
+)
+
+# 床を効かせるのは技術ドキュメントだけである。距離が圏内・圏外を分けないため、
+# 採否は床が決める（ingest/retrieval.py の DOCS_RERANK_FLOOR の実測）。
+_TECH_DOCS = _Corpus(
+    label="技術ドキュメント",
+    rerank_floor=DOCS_RERANK_FLOOR,
+    no_hits=_DOCS_NO_HITS,
+    caution=_DOCS_CAUTION,
+    empty_store=_DOCS_EMPTY_STORE,
+)
+
+
+def format_results(hits: list, corpus: _Corpus = _INTERNAL) -> str:
     """Hit の並びを Markdown に組む。
 
     出典は all_citations() で全件並べる。画面表示に使う citation は
@@ -82,9 +171,9 @@ def format_results(hits: list) -> str:
     丸めるとその経路が塞がる（設計書4.5節）。
     """
     if not hits:
-        return _NO_HITS
+        return corpus.no_hits
 
-    blocks = [f"社内資料から {len(hits)} 件が見つかりました。"]
+    blocks = [f"{corpus.label}から {len(hits)} 件が見つかりました。"]
     for number, hit in enumerate(hits, start=1):
         # スコア部分だけを取る。出典は下で全件並べるため重複させない。
         # 右から刻む。caption は「出典 ／ 距離 ／ BM25 ／ Reranker」の4欄で
@@ -93,24 +182,27 @@ def format_results(hits: list) -> str:
         scores = " ／ ".join(format_hit_caption(hit).rsplit(" ／ ", 3)[1:])
         citations = "\n".join(f"- {one}" for one in hit.all_citations())
         blocks.append(f"## [{number}] {scores}\n出典:\n{citations}\n\n{hit.text}")
-    blocks.append(_CAUTION)
+    blocks.append(corpus.caution)
     return "\n\n".join(blocks)
 
 
 @dataclass
 class _State:
-    """プロセスの生存期間だけ持つ状態。
+    """1つのコーパスについて、プロセスの生存期間だけ持つ状態。
 
-    サーバは Codex がセッションごとに起こす子プロセスであり、常駐する。
+    サーバは GB10 の rag-mcp.service として常駐し、Claude Code から引かれる。
     常駐する理由はDBを開くのが重いからではない（実測0.40ms）。BM25索引の
     構築が57msかかり、エージェントは1タスク中に何度も検索するためである
     （2026-09-08、570出現・本文512種の実測）。
+
+    コーパスごとに1つ持つ（_state と _docs_state）。片方の取り込みで
+    revision が変わっても、もう片方の索引は組み直さない。リランカーの準備
+    状況はモデルが共通なので、ここではなくプロセスで1つ（_reranker_ready）。
     """
 
     store: object | None = None
     index: object | None = None
     index_revision: int | None = None
-    reranker_ready: bool = False
 
 
 def _get_index(state: _State, collection):
@@ -129,6 +221,8 @@ def _get_index(state: _State, collection):
 
 mcp = MCPServer("local_docs")
 _state = _State()
+_docs_state = _State()
+_reranker_ready = False
 
 # 検索を直列化する。stdio では Codex が単一クライアントであり、リクエストは
 # 直列に届くので競合しなかった。--http で複数PCから引くとその前提が消える。
@@ -157,7 +251,12 @@ def _open():
     return store.open_store(str(store.DB_PATH))
 
 
-def _get_store(state: _State):
+def _open_docs():
+    """技術ドキュメントのDBを開く。パスは store.DOCS_DB_PATH だけを使う（_open と同じ理由）。"""
+    return store.open_store(str(store.DOCS_DB_PATH))
+
+
+def _get_store(state: _State, opener: Callable[[], object]):
     """ストアを返す。開くのはプロセスの生存期間で1度だけ。
 
     リクエストごとに開き直してはならない。open_store() は読み取りではなく、
@@ -172,7 +271,7 @@ def _get_store(state: _State):
     たまたま取り込みの書き込みと重なれば、その1回はやはり待たされる。
     """
     if state.store is None:
-        state.store = _open()
+        state.store = opener()
     return state.store
 
 
@@ -189,14 +288,18 @@ def _ensure_reranker():
     へのHEAD6回）で、残りは初回 rerank() のONNXセッション構築である。
 
     取得に失敗しても検索は続ける。既存の劣化運転方針に揃える（設計書7節）。
+
+    モデルは2つのコーパスで同じなので、確かめるのはプロセスで1回である
+    （_reranker_ready はコーパスごとの _State ではなくモジュールに持つ）。
     """
-    if _state.reranker_ready:
+    global _reranker_ready
+    if _reranker_ready:
         return reranker.rerank
     try:
         reranker.check_reranker()
     except reranker.RerankError:
         return None
-    _state.reranker_ready = True
+    _reranker_ready = True
     return reranker.rerank
 
 
@@ -209,27 +312,42 @@ def search_documents(query: str, n_results: int = SEARCH_RESULT_COUNT) -> str:
         n_results: 返すチャンク数。
     """
     with _search_lock:
-        return _search(query, n_results)
+        return _search(_INTERNAL, _state, _open, query, n_results)
 
 
-def _search(query: str, n_results: int) -> str:
+@mcp.tool()
+def search_tech_docs(query: str, n_results: int = SEARCH_RESULT_COUNT) -> str:
+    """OSS ライブラリ・言語仕様の公式ドキュメントを検索し、原文を出典つきで返す。
+
+    Args:
+        query: 英語の疑問文で書く。
+        n_results: 返すチャンク数。
+    """
+    with _search_lock:
+        return _search(_TECH_DOCS, _docs_state, _open_docs, query, n_results)
+
+
+def _search(
+    corpus: _Corpus,
+    state: _State,
+    opener: Callable[[], object],
+    query: str,
+    n_results: int,
+) -> str:
     """検索の本体。_search_lock を握った状態で呼ばれる。"""
     try:
-        collection = _get_store(_state)
+        collection = _get_store(state, opener)
         if collection.count() == 0:
-            # 「関連する記述が無い」と取り違えさせない。取り込みを忘れている
-            # 利用者は、質問を言い換え続けても永遠に0件を得る（設計書7節）。
-            return (
-                "ベクトルDBが空です。取り込みが未実行の可能性があります。"
-                "python -m scripts.ingest_source を実行してください。"
-            )
-        index = _get_index(_state, collection)
+            # 「関連する記述が無い」と取り違えさせない（_EMPTY_STORE の説明）。
+            return corpus.empty_store
+        index = _get_index(state, collection)
         hits = search(
             collection,
             query,
             index=index,
             n_results=n_results,
             rerank=_ensure_reranker(),
+            rerank_floor=corpus.rerank_floor,
         )
     except (EmbeddingError, store.EmbeddingMismatchError) as error:
         # EmbeddingMismatchError は DB と設定の埋め込みモデルの食い違い。
@@ -256,7 +374,7 @@ def _search(query: str, n_results: int) -> str:
         # RerankError はここへ来ない。check_reranker の失敗は _ensure_reranker
         # が、rerank の失敗は retrieval._reranked が、それぞれ手前で捕まえる。
         return str(error)
-    return format_results(hits)
+    return format_results(hits, corpus)
 
 
 def main(argv=None) -> None:
