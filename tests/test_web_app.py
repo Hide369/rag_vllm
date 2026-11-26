@@ -933,6 +933,24 @@ def test_script_never_sends_docs_requests_for_guests():
     assert 'querySelectorAll(".admin-only")' in script
 
 
+def test_script_keeps_the_question_when_the_session_expired():
+    """ログインが切れたまま技術ドキュメントで質問したら、質問を失わせない。
+
+    401 は送れなかった質問として履歴に積まず（社内資料へ戻すときに会話ごと消えない）、
+    質問の文を入力欄へ戻す。
+    """
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "rejected: unauthorized" in script
+    assert 'await loadMe();\n    $("question").value = question;' in script
+
+
+def test_script_rechecks_login_when_the_status_is_refused():
+    """技術ドキュメントの状態が 401 なら、ログイン状態を取り直して社内資料へ戻す。"""
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    load_status = script[script.index("async function loadStatus()"):script.index("// --- 管理者ログイン")]
+    assert "if (error instanceof ApiError && error.status === 401) await loadMe();" in load_status
+
+
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
     # 見出し・ラベルの文言を固定する。

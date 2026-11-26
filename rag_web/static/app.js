@@ -334,6 +334,8 @@ async function loadStatus() {
     status = await api(`/api/status?corpus=${encodeURIComponent(corpus)}`);
   } catch (error) {
     show("status-error", `状態を取得できませんでした: ${userMessage(error)}`);
+    // 技術ドキュメントを選んだままログインが切れた。ログイン欄へ戻し、社内資料へ戻す
+    if (error instanceof ApiError && error.status === 401) await loadMe();
     return;
   }
   // 取りに行っている間に検索対象が切り替わったら、古い結果で上書きしない
@@ -671,7 +673,9 @@ async function ask(question) {
       finished = { error: await chatRejectedMessage(response), rejected: true };
     } else if (!response.ok) {
       unauthorized = response.status === 401;
-      finished = { error: `回答を生成できませんでした: ${await errorMessage(response)}` };
+      // 401 は送れなかった質問として履歴に積まない。積むと、社内資料へ戻すときに
+      // 会話ごと消え、エラーも質問も画面から失われる（質問は呼び出し側が入力欄へ戻す）
+      finished = { error: `回答を生成できませんでした: ${await errorMessage(response)}`, rejected: unauthorized };
     } else {
       for await (const event of readEvents(response)) {
         if (event.type === "note") noteBox.textContent = event.text;
@@ -737,8 +741,12 @@ $("chat-form").addEventListener("submit", async (event) => {
   }
   // 生成中は applyAdmin が検索対象を戻さない（Cowork の 401 では runJob が生成中に
   // loadMe を呼ぶ）。終わったここで、管理者でなくなっていれば戻す
-  if (unauthorized) await loadMe();
-  else applyAdmin();
+  if (unauthorized) {
+    await loadMe();
+    $("question").value = question;
+  } else {
+    applyAdmin();
+  }
   // リランカーの確認結果とチャンク数は検索のあとで変わりうる
   loadStatus();
 });
