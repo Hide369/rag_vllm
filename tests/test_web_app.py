@@ -905,6 +905,34 @@ def test_cowork_guide_is_folded_by_default_and_explains_template_marks():
     assert 'show("cowork-help-template-suffixes", options.template_suffixes.join("・"))' in script
 
 
+def test_docs_controls_start_hidden_and_are_marked_admin_only():
+    """技術ドキュメントの要素は、管理者と分かるまで出さない（利用者に一瞬見えないように）。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for marker in ('value="docs"', 'id="cowork-docs"'):
+        start = html.rindex("<label", 0, html.index(marker))
+        tag = html[start:html.index(">", start)]
+        assert "admin-only" in tag and "hidden" in tag, marker
+    # Cowork の案内文の「技術ドキュメント」も admin-only の中にだけ書く
+    start = html.index('id="cowork-help"')
+    guide = html[start:html.index("</details>", start)]
+    spans = re.findall(r'<span class="admin-only hidden">[^<]*</span>', guide)
+    assert spans
+    for span in spans:
+        guide = guide.replace(span, "")
+    assert "技術ドキュメント" not in guide
+
+
+def test_script_never_sends_docs_requests_for_guests():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    # 隠れたチェックが自動で入って use_docs を送り、401 になることがないように
+    assert 'use_docs: state.admin && $("cowork-docs").checked' in script
+    assert "state.admin && state.coworkOptions.source_suffixes.includes" in script
+    # 生成中に検索対象や会話を書き換えさせない
+    assert '$("logout").disabled = generating' in script
+    assert "管理者としてログインしていないため、検索対象を社内資料に戻し" in script
+    assert 'querySelectorAll(".admin-only")' in script
+
+
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
     # 見出し・ラベルの文言を固定する。

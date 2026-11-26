@@ -365,8 +365,21 @@ function applyAdmin() {
   setHidden("login-form", state.admin);
   setHidden("logged-in", !state.admin);
   setHidden("ingest", !state.admin);
+  // 技術ドキュメントは管理者だけ（利用者のコーディングは VS Code で行う）。サーバーも
+  // 利用者からの技術ドキュメントの要求は 401 で断る
+  for (const node of document.querySelectorAll(".admin-only")) node.classList.toggle("hidden", !state.admin);
+  if (state.admin) return;
   // ログアウトした瞬間に消す。ログインしたときの表示は、次の loadStatus が名前を取ってくる
-  if (!state.admin) show("source-dir", "");
+  show("source-dir", "");
+  $("cowork-docs").checked = false;
+  // 生成中は検索対象も会話も書き換えない。生成が終わったあと送信ハンドラが改めて呼ぶ
+  if (!state.generating && state.corpus === "docs") {
+    switchCorpus(
+      "internal",
+      "管理者としてログインしていないため、検索対象を社内資料に戻し、会話履歴をリセットしました。",
+      "管理者としてログインしていないため、検索対象を社内資料に戻しました。",
+    );
+  }
 }
 
 async function loadMe() {
@@ -550,6 +563,8 @@ function setGenerating(generating) {
   $("question").disabled = generating;
   $("send").disabled = generating;
   $("reset-history").disabled = generating;
+  // 生成中にログアウトすると、検索対象や会話を書き換えて表示が壊れる
+  $("logout").disabled = generating;
   for (const radio of document.querySelectorAll("input[name=corpus]")) radio.disabled = generating;
   // 生成の途中でモードや Cowork の入力を変えさせない。送った依頼と画面の選択が食い違う
   for (const radio of document.querySelectorAll("input[name=mode]")) radio.disabled = generating;
@@ -622,6 +637,8 @@ async function ask(question) {
 
   let answer = "";
   let finished = null; // { content, display } または { error, rejected? }
+  // 技術ドキュメントを選んだままセッションが切れた。呼び出し側がログイン状態を取り直す
+  let unauthorized = false;
   let evidence = null;
   let pending = false;
   const redraw = () => {
@@ -653,6 +670,7 @@ async function ask(question) {
       // 質問そのものが受け付けられなかった。履歴に残すと次の質問も同じ理由で弾かれ続ける
       finished = { error: await chatRejectedMessage(response), rejected: true };
     } else if (!response.ok) {
+      unauthorized = response.status === 401;
       finished = { error: `回答を生成できませんでした: ${await errorMessage(response)}` };
     } else {
       for await (const event of readEvents(response)) {
@@ -699,6 +717,7 @@ async function ask(question) {
     state.history.push({ role: "assistant", content: finished.content });
   }
   if (follow) scrollToBottom();
+  return unauthorized;
 }
 
 $("chat-form").addEventListener("submit", async (event) => {
@@ -707,14 +726,19 @@ $("chat-form").addEventListener("submit", async (event) => {
   if (!question || state.generating) return;
   $("question").value = "";
   setGenerating(true);
+  let unauthorized = false;
   try {
     if (state.mode === "cowork") await runCowork(question);
-    else await ask(question);
+    else unauthorized = await ask(question);
   } finally {
     // done / error / 通信断のどれでも必ず入力欄を戻す
     setGenerating(false);
     $("question").focus();
   }
+  // 生成中は applyAdmin が検索対象を戻さない（Cowork の 401 では runJob が生成中に
+  // loadMe を呼ぶ）。終わったここで、管理者でなくなっていれば戻す
+  if (unauthorized) await loadMe();
+  else applyAdmin();
   // リランカーの確認結果とチャンク数は検索のあとで変わりうる
   loadStatus();
 });
@@ -752,7 +776,8 @@ function syncOutputSuffix() {
   const suffix = effectiveOutputSuffix();
   if (state.lastOutputSuffix === suffix) return;
   state.lastOutputSuffix = suffix;
-  $("cowork-docs").checked = state.coworkOptions.source_suffixes.includes(suffix.toLowerCase());
+  // 利用者には技術ドキュメントのチェックを出さない。隠れたまま入れて use_docs を送らない
+  $("cowork-docs").checked = state.admin && state.coworkOptions.source_suffixes.includes(suffix.toLowerCase());
 }
 
 let coworkOptionsSeq = 0;
@@ -864,7 +889,7 @@ async function runCowork(question) {
       template: $("cowork-template").value || null,
       output_suffix: effectiveOutputSuffix(),
       use_internal: $("cowork-internal").checked,
-      use_docs: $("cowork-docs").checked,
+      use_docs: state.admin && $("cowork-docs").checked,
       pasted: $("cowork-pasted").value,
       attachments: await Promise.all(files.map(async (file) => ({ name: file.name, content_b64: await toBase64(file) }))),
     };
@@ -975,20 +1000,25 @@ $("close-templates").addEventListener("click", () => $("template-dialog").close(
 
 $("temperature").addEventListener("input", () => show("temperature-value", Number($("temperature").value).toFixed(1)));
 
+// 検索対象を切り替える。履歴を残すと、前の検索対象向けの質問が検索語に継ぎ足されて
+// 検索ごと壊れるため消し、消したことは画面に出す。
+function switchCorpus(corpus, resetMessage, plainMessage) {
+  state.corpus = corpus;
+  for (const radio of document.querySelectorAll("input[name=corpus]")) radio.checked = radio.value === corpus;
+  if (state.history.length) {
+    clearChat();
+    show("corpus-msg", resetMessage);
+  } else {
+    show("corpus-msg", plainMessage);
+  }
+  show("chunk-count", "-");
+  loadStatus();
+}
+
 for (const radio of document.querySelectorAll("input[name=corpus]")) {
   radio.addEventListener("change", () => {
     if (!radio.checked || state.generating) return;
-    state.corpus = radio.value;
-    // 履歴を残すと、前の検索対象向けの質問が検索語に継ぎ足されて検索ごと壊れる。
-    // 消したことは画面に出す。
-    if (state.history.length) {
-      clearChat();
-      show("corpus-msg", "検索対象を切り替えたため、会話履歴をリセットしました。");
-    } else {
-      show("corpus-msg", "");
-    }
-    show("chunk-count", "-");
-    loadStatus();
+    switchCorpus(radio.value, "検索対象を切り替えたため、会話履歴をリセットしました。", "");
   });
 }
 
@@ -1004,5 +1034,6 @@ $("reset-history").addEventListener("click", () => {
 state.corpus = document.querySelector("input[name=corpus]:checked")?.value || "internal";
 setMode(document.querySelector("input[name=mode]:checked")?.value || "chat");
 show("temperature-value", Number($("temperature").value).toFixed(1));
-loadMe();
-loadStatus();
+// ログイン状態を先に確かめる。再読み込みで「技術ドキュメント」が復元されていても、
+// 利用者なら社内資料へ戻してから状態を取る（技術ドキュメントの状態は 401 になる）
+loadMe().then(loadStatus);
