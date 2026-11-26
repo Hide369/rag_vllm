@@ -1,7 +1,9 @@
 """Web 画面（FastAPI）。チャット・Cowork・サイドバー（資料の取り込みと管理）の API と静的ファイルの配信。
 
 - 閲覧・チャット・アップロード・アップロード済み資料の削除は誰でもできる（ログイン不要）
-- 社内資料の差分取り込み（POST /api/ingest）だけは管理者ログインが要る
+- 社内資料の差分取り込み（POST /api/ingest）は管理者ログインが要る
+- 技術ドキュメントの利用（状態・チャットの検索・Cowork の参照）も管理者だけ。利用者の
+  コーディングは VS Code で行うため、Web 画面の利用者には見せない
 - GET 以外は X-Requested-With ヘッダーを必須にする（CSRF 対策。ログインが無くても、
   別サイトのページから取り込みや削除を実行させられるのを防ぐ）
 - 取り込み・アップロード・削除・フォーマットファイルの登録削除は共有ロックで全利用者を通して
@@ -77,6 +79,7 @@ COWORK_BUSY_MESSAGE = (
     "ほかの人の生成が混み合っています。少し待ってからもう一度実行してください"
 )
 SHARED_BUSY_MESSAGE = "ほかの人が取り込み中です。終わってからもう一度実行してください"
+ADMIN_REQUIRED_MESSAGE = "管理者としてログインしてください"
 TEMPLATE_CAPTION = (
     "フォーマットファイルの空欄は {{会議名}} のように書いてください。"
     "登録したフォーマットファイルはこのマシンの templates/ に残ります。"
@@ -344,7 +347,13 @@ def create_app(
         if request.method not in ("GET", "HEAD"):
             require_csrf_header(request)
         if not is_admin(request):
-            raise HTTPException(401, "管理者としてログインしてください")
+            raise HTTPException(401, ADMIN_REQUIRED_MESSAGE)
+
+    def require_docs_access(request: Request, uses_docs: bool) -> None:
+        # 技術ドキュメントは管理者だけ。画面で隠すだけでなく、API を直接呼ばれても断る。
+        # DB を開く前に呼ぶ（食い違った DB の詳細を利用者に見せない）。
+        if uses_docs and not is_admin(request):
+            raise HTTPException(401, ADMIN_REQUIRED_MESSAGE)
 
     def require_embedder() -> None:
         # 取り込みを始めてから落ちるのを防ぐ。CLI と同じ確認。
@@ -409,20 +418,25 @@ def create_app(
 
     @app.get("/api/status")
     def status(request: Request, corpus: Corpus = INTERNAL) -> dict:
-        return {
+        require_docs_access(request, corpus == "docs")
+        result = {
             "corpus": corpus,
             "chunk_count": corpora.collection(corpus).count(),
             # 取り込み元はサーバー内部のフォルダで、使うのは取り込みを走らせる管理者だけ。
             # 画面で隠すだけでなく、利用者には値そのものを返さない。
             "source_dir_name": services.source_dir.name if is_admin(request) else None,
-            "docs_ingest_command": DOCS_INGEST_COMMAND,
             "reranker": corpora.reranker_status(),
             "shared_busy": jobs.shared_busy(),
         }
+        if corpus == "docs":
+            result["docs_ingest_command"] = DOCS_INGEST_COMMAND
+        return result
 
     @app.post("/api/chat", dependencies=[Depends(require_csrf_header)])
-    def chat(body: ChatBody) -> StreamingResponse:
-        request = ChatRequest(
+    def chat(body: ChatBody, request: Request) -> StreamingResponse:
+        # ストリームを始める前に断る（始めてしまうと状態コードで伝えられない）
+        require_docs_access(request, body.corpus == "docs")
+        chat_request = ChatRequest(
             corpus=body.corpus,
             model=chat_model,
             temperature=body.temperature,
@@ -431,7 +445,7 @@ def create_app(
         )
 
         def lines() -> Iterator[str]:
-            for event in answer_events(request, services, corpora, today()):
+            for event in answer_events(chat_request, services, corpora, today()):
                 yield json.dumps(event, ensure_ascii=False) + "\n"
 
         return StreamingResponse(lines(), media_type="application/x-ndjson")
@@ -520,7 +534,8 @@ def create_app(
         }
 
     @app.post("/api/cowork", dependencies=[Depends(require_csrf_header)])
-    def cowork(body: CoworkBody) -> dict:
+    def cowork(body: CoworkBody, request: Request) -> dict:
+        require_docs_access(request, body.use_docs)
         files = _decode_uploads(
             body.attachments, settings.max_upload_bytes,
             SUPPORTED_SUFFIXES, UNSUPPORTED_ATTACHMENT,
@@ -530,7 +545,7 @@ def create_app(
                 template_path(services, body.template)
             except FileNotFoundError as e:
                 raise HTTPException(400, NO_SUCH_TEMPLATE_MESSAGE) from e
-        request = CoworkRequest(
+        cowork_request = CoworkRequest(
             model=chat_model,
             question=body.question,
             template=body.template,
@@ -551,7 +566,7 @@ def create_app(
 
         def work() -> dict:
             try:
-                return generate_cowork(request, services, corpora, generated_on)
+                return generate_cowork(cowork_request, services, corpora, generated_on)
             finally:
                 cowork_slots.release()
 

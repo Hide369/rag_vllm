@@ -363,7 +363,6 @@ def test_status_reports_counts_and_reranker_state(client, fake):
         "chunk_count": 0,
         # 取り込み元のフォルダ名はサーバーの内部の事情なので、管理者にしか返さない
         "source_dir_name": None,
-        "docs_ingest_command": DOCS_INGEST_COMMAND,
         "reranker": {"state": "unchecked", "reason": None},
         "shared_busy": False,
     }
@@ -372,6 +371,8 @@ def test_status_reports_counts_and_reranker_state(client, fake):
     # 検索1回でリランカーの確認が走り、状態が status に出る。
     lines = client.post("/api/chat", json=_chat_body(), headers=CSRF).text
     assert lines
+    # 技術ドキュメントの状態は管理者にしか返さない
+    _login(client)
     docs = client.get("/api/status", params={"corpus": "docs"}).json()
     assert docs["corpus"] == "docs"
     assert docs["chunk_count"] == 1
@@ -389,6 +390,38 @@ def test_status_reports_source_dir_name_only_to_admin(client, fake):
 
     client.post("/api/logout", headers=CSRF)
     assert client.get("/api/status").json()["source_dir_name"] is None
+
+
+ADMIN_REQUIRED = "管理者としてログインしてください"
+
+
+def test_docs_status_is_for_admin_only(client, fake):
+    """利用者のコーディングは VS Code で行うため、技術ドキュメントは管理者にだけ見せる。"""
+    response = client.get("/api/status", params={"corpus": "docs"})
+    assert response.status_code == 401
+    assert response.json()["detail"] == ADMIN_REQUIRED
+
+    _login(client)
+    assert client.get("/api/status", params={"corpus": "docs"}).status_code == 200
+
+    client.post("/api/logout", headers=CSRF)
+    assert client.get("/api/status", params={"corpus": "docs"}).status_code == 401
+
+
+def test_internal_status_does_not_carry_the_docs_ingest_command(client):
+    _login(client)
+    assert "docs_ingest_command" not in client.get("/api/status").json()
+
+
+def test_docs_chat_is_for_admin_only(client, fake):
+    response = client.post("/api/chat", json=_chat_body(corpus="docs"), headers=CSRF)
+    assert response.status_code == 401
+    assert response.json()["detail"] == ADMIN_REQUIRED
+    assert fake.chat_calls == []
+
+    _login(client)
+    response = client.post("/api/chat", json=_chat_body(corpus="docs"), headers=CSRF)
+    assert response.status_code == 200
 
 
 def _record_other_embedding_model(path):
@@ -418,14 +451,26 @@ def test_a_mismatched_db_reaches_the_chat_screen_as_an_error_event(client, fake)
     assert '"type": "error"' in text
 
 
+def test_docs_access_is_checked_before_opening_the_db(client, fake):
+    """食い違った DB でも、利用者には 503 の詳細（モデル名）ではなく 401 を返す。"""
+    _record_other_embedding_model(fake.db_paths["docs"])
+
+    response = client.get("/api/status", params={"corpus": "docs"})
+
+    assert response.status_code == 401
+    assert "qwen3-embedding" not in response.text
+
+
 def test_status_of_an_empty_docs_corpus_carries_the_ingest_command(client):
     """技術ドキュメントが0件のとき、画面が警告に出す取り込みコマンドを status が返す。
 
     open_store はパスを間違えても例外を出さず空の DB を新規作成する。件数0のまま
     黙って検索させず、取り込みに使う2つのコマンドを画面が示せるようにする。
     """
+    _login(client)
     docs = client.get("/api/status", params={"corpus": "docs"}).json()
     assert docs["chunk_count"] == 0
+    assert docs["docs_ingest_command"] == DOCS_INGEST_COMMAND
     assert "scripts.fetch_docs" in docs["docs_ingest_command"]
     assert "scripts.ingest_source" in docs["docs_ingest_command"]
 
@@ -860,6 +905,52 @@ def test_cowork_guide_is_folded_by_default_and_explains_template_marks():
     assert 'show("cowork-help-template-suffixes", options.template_suffixes.join("・"))' in script
 
 
+def test_docs_controls_start_hidden_and_are_marked_admin_only():
+    """技術ドキュメントの要素は、管理者と分かるまで出さない（利用者に一瞬見えないように）。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for marker in ('value="docs"', 'id="cowork-docs"'):
+        start = html.rindex("<label", 0, html.index(marker))
+        tag = html[start:html.index(">", start)]
+        assert "admin-only" in tag and "hidden" in tag, marker
+    # Cowork の案内文の「技術ドキュメント」も admin-only の中にだけ書く
+    start = html.index('id="cowork-help"')
+    guide = html[start:html.index("</details>", start)]
+    spans = re.findall(r'<span class="admin-only hidden">[^<]*</span>', guide)
+    assert spans
+    for span in spans:
+        guide = guide.replace(span, "")
+    assert "技術ドキュメント" not in guide
+
+
+def test_script_never_sends_docs_requests_for_guests():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    # 隠れたチェックが自動で入って use_docs を送り、401 になることがないように
+    assert 'use_docs: state.admin && $("cowork-docs").checked' in script
+    assert "state.admin && state.coworkOptions.source_suffixes.includes" in script
+    # 生成中に検索対象や会話を書き換えさせない
+    assert '$("logout").disabled = generating' in script
+    assert "管理者としてログインしていないため、検索対象を社内資料に戻し" in script
+    assert 'querySelectorAll(".admin-only")' in script
+
+
+def test_script_keeps_the_question_when_the_session_expired():
+    """ログインが切れたまま技術ドキュメントで質問したら、質問を失わせない。
+
+    401 は送れなかった質問として履歴に積まず（社内資料へ戻すときに会話ごと消えない）、
+    質問の文を入力欄へ戻す。
+    """
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "rejected: unauthorized" in script
+    assert 'await loadMe();\n    $("question").value = question;' in script
+
+
+def test_script_rechecks_login_when_the_status_is_refused():
+    """技術ドキュメントの状態が 401 なら、ログイン状態を取り直して社内資料へ戻す。"""
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    load_status = script[script.index("async function loadStatus()"):script.index("// --- 管理者ログイン")]
+    assert "if (error instanceof ApiError && error.status === 401) await loadMe();" in load_status
+
+
 def test_index_has_cowork_controls():
     # チャット / Cowork の切り替え、Cowork の入力欄、フォーマットファイルのダイアログ。
     # 見出し・ラベルの文言を固定する。
@@ -924,6 +1015,18 @@ def _cowork_result(client, jobs, body):
     outcome = _job_result(client, jobs, response.json()["job_id"])
     assert outcome["state"] == "done", outcome
     return outcome["result"]
+
+
+def test_cowork_with_docs_is_for_admin_only(client, fake, jobs):
+    response = client.post("/api/cowork", json=_cowork_body(use_docs=True), headers=CSRF)
+    assert response.status_code == 401
+    assert response.json()["detail"] == ADMIN_REQUIRED
+    assert fake.ask_text_calls == [] and fake.ask_json_calls == []
+
+    # 技術ドキュメントを使わない依頼は、利用者も今までどおり通る
+    _cowork_result(client, jobs, _cowork_body(use_docs=False))
+    _login(client)
+    _cowork_result(client, jobs, _cowork_body(use_docs=True))
 
 
 def test_cowork_options_lists_formats_and_templates(client, fake):
