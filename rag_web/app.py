@@ -63,11 +63,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 VENDOR_DIR = STATIC_DIR / "vendor"
 
 # 社内資料以外（技術ドキュメント）のコーパスが空のとき、画面に示す取り込みコマンド。
-DOCS_INGEST_COMMAND = (
-    "python -m scripts.fetch_docs のあと "
-    "python -m scripts.ingest_source --source-dir docs_source "
-    "--db docs_store.sqlite3 --keep-code-blocks"
-)
+# 定義は ingest/store.py にある（1か所に置く理由もそちら）。
+DOCS_INGEST_COMMAND = store.DOCS_INGEST_COMMAND
 
 UPLOAD_CAPTION = (
     "アップロードした資料はDBに残り、全利用者の検索対象になります。"

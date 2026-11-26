@@ -31,6 +31,20 @@ DB_PATH = Path(__file__).resolve().parent.parent / DB_FILENAME
 DOCS_DB_FILENAME = "docs_store.sqlite3"
 DOCS_DB_PATH = Path(__file__).resolve().parent.parent / DOCS_DB_FILENAME
 
+# 技術ドキュメントの取り込みコマンド。画面（rag_web/app.py）・実測スクリプト
+# （scripts/check_retrieval.py）・MCP サーバ（scripts/rag_mcp_server.py）が案内に
+# 使う。各自で書くと片方だけ直して食い違うため、ここ1か所に置く。MCP サーバは
+# FastAPI の画面一式を読み込む rag_web.app を import すべきでないので、置き場所は
+# 全員が読めるこのモジュールにする。
+#
+# 取り込みだけのコマンドを別に持つのは、オフラインの GB10 では fetch_docs を
+# 走らせられないため（docs_source/ は git で追跡済みなので取得し直さずに済む）。
+DOCS_INGEST_SOURCE_COMMAND = (
+    "python -m scripts.ingest_source --source-dir docs_source "
+    f"--db {DOCS_DB_FILENAME} --keep-code-blocks"
+)
+DOCS_INGEST_COMMAND = "python -m scripts.fetch_docs のあと " + DOCS_INGEST_SOURCE_COMMAND
+
 
 # 記録の無いDBは Ollama 時代に bge-m3・1024次元で作られたものである。
 # 記録が無いことを「何でもよい」と読むと、別モデルで入れ直した瞬間から

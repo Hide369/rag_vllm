@@ -312,11 +312,8 @@ DOCS_INCIDENTAL = (
 DOCS_GREETINGS = GREETINGS
 
 INTERNAL_INGEST_COMMAND = "python -m scripts.ingest_source"
-DOCS_INGEST_COMMAND = (
-    "python -m scripts.fetch_docs のあと "
-    "python -m scripts.ingest_source --source-dir docs_source "
-    "--db docs_store.sqlite3 --keep-code-blocks"
-)
+# 定義は ingest/store.py にある（1か所に置く理由もそちら）。
+DOCS_INGEST_COMMAND = store.DOCS_INGEST_COMMAND
 
 
 @dataclass(frozen=True)
