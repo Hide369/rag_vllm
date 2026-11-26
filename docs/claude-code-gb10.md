@@ -8,6 +8,11 @@ HTTP で引く。クラウドのモデルは使わず、ライブラリを調べ
 GB10 側の配置（vLLM・Nginx・MCP）は [server-deployment.md](server-deployment.md) にある。
 この文書は、その配置が済んだあとのクライアントの設定を扱う。
 
+> **GB10 を3台にする構成（推論用の GB10-A / GB10-B と RAG 用 GB10）では、推論はこの文書の
+> GB10 ではなく LiteLLM 経由の2台を使う。** その場合、手順3の `env` の `ANTHROPIC_*` は写さず、
+> `permissions` と `ENABLE_TOOL_SEARCH` だけを使い、手順4以降に進む。Windows の検索サーバから
+> 移るときの差分は [mcp/windows-to-gb10-migration.md](mcp/windows-to-gb10-migration.md) にある。
+
 > **実測はしていない。** GB10 はまだ使えず、この手順を通しで実行した記録は無い。Colab の
 > vLLM（gpt-oss-20b）で、`--enable-auto-tool-choice --tool-call-parser openai` の指定で
 > 起動することまでは確かめた（2026-11-23）が、Claude Code から繋いではいない。各段階に

@@ -1,11 +1,31 @@
-# Windows の検索サーバ（Ollama 版）から GB10（vLLM 版）へ移行する
+# Windows の検索サーバ（Ollama 版）から RAG 用 GB10（vLLM 版）へ移行する
 
 社内資料の検索（MCP）と RAG の画面を、Windows の検索サーバ（Ollama 版 `local-llm-rag`）から
-GB10（本リポジトリ、vLLM 版）へ移す手順である。DB は Windows で使っているものをそのまま
-持ち込む。移行に合わせて、Claude Code のライブラリの調べものを context7 から GB10 の
+RAG 専用の GB10（本リポジトリ、vLLM 版）へ移す手順である。DB は Windows で使っているものを
+そのまま持ち込む。移行に合わせて、Claude Code のライブラリの調べものを context7 から
 `search_tech_docs` へ切り替える。
 
 対象のクライアントは VS Code の Claude Code だけである。
+
+## GB10 は3台になる
+
+| GB10 | 動かすもの | 使う人 | 本書で |
+| --- | --- | --- | --- |
+| GB10-A（既存） | gpt-oss-120b | Claude Code（LiteLLM 経由） | **触らない** |
+| GB10-B（既存） | Qwen3-Coder-Next | Claude Code（LiteLLM 経由） | **触らない** |
+| RAG 用 GB10（新設。本書では `<RAG用GB10>`） | vLLM 3つ（生成 gpt-oss-120b・埋め込み bge-m3・画像説明）、`rag-web`、`rag-mcp`、Nginx | RAG の画面、Claude Code の MCP | 立てて、Windows から移す |
+
+**Claude Code の推論（モデル）は移さない。** 今までどおり LiteLLM から GB10-A / GB10-B を使う。
+クライアントで変えるのは MCP の接続先と、それに関わる設定（`permissions`・`CLAUDE.md`・
+context7）だけである。RAG 用 GB10 の gpt-oss-120b は、RAG の画面の回答生成と文書生成のためにある。
+
+```text
+クライアントPC（VS Code + Claude Code）
+ ├ 推論 ─ http://<LiteLLM>:4000 ─▶ GB10-A gpt-oss-120b / GB10-B Qwen3-Coder-Next   （変えない）
+ └ MCP  ─ https://<RAG用GB10>/mcp ─▶ Nginx ─▶ rag-mcp（search_documents / search_tech_docs）
+                                               └ 埋め込み: 同じ GB10 の vLLM bge-m3
+ブラウザー ─ https://<RAG用GB10>/ ─▶ Nginx ─▶ rag-web ─▶ 同じ GB10 の vLLM gpt-oss-120b
+```
 
 > **実測はしていない。** GB10 の実機はまだ使えず、この手順を通しで実行した記録は無い。
 > 各段の「確かめる」を実機で通し、結果が違えば手順を直すこと。通したら、この注記を外して
@@ -13,13 +33,15 @@ GB10（本リポジトリ、vLLM 版）へ移す手順である。DB は Windows
 
 ## 移行前と移行後
 
-| | 移行前（Windows） | 移行後（GB10） |
+| | 移行前（Windows） | 移行後（RAG 用 GB10） |
 | --- | --- | --- |
 | 置き場所 | `C:\App\local-llm-rag`（Ollama 版のリポジトリ） | `/opt/rag`（本リポジトリ） |
-| MCP | NSSM の `local-docs-mcp`、`http://<検索サーバIP>:11434/mcp`、認証なし | systemd の `rag-mcp`、`https://<GB10>/mcp`、Bearer トークン |
+| MCP | NSSM の `local-docs-mcp`、`http://<検索サーバIP>:11434/mcp`、認証なし | systemd の `rag-mcp`、`https://<RAG用GB10>/mcp`、Bearer トークン |
 | MCP のツール | `search_documents` | `search_documents` と `search_tech_docs` |
-| RAG の画面 | NSSM の `local-llm-rag`（Streamlit） | systemd の `rag-web`（`https://<GB10>/`） |
+| RAG の画面 | NSSM の `local-llm-rag`（Streamlit） | systemd の `rag-web`（`https://<RAG用GB10>/`） |
 | 埋め込み | Ollama（`127.0.0.1:11500`、bge-m3） | vLLM（`127.0.0.1:8002`、bge-m3） |
+| RAG の回答生成 | Ollama 版の設定のまま | RAG 用 GB10 の vLLM（`127.0.0.1:8001`、gpt-oss-120b） |
+| Claude Code の推論 | LiteLLM → GB10-A / GB10-B | **変えない** |
 | ライブラリの調べもの | context7（社外のサービス） | `search_tech_docs`（GB10 の技術DB） |
 | DB | `vector_store.sqlite3` / `docs_store.sqlite3` | 同じファイルを持ち込む |
 
@@ -51,9 +73,9 @@ GB10（本リポジトリ、vLLM 版）へ移す手順である。DB は Windows
 
 | 項目 | 決めること |
 | --- | --- |
-| GB10 のホスト名と証明書 | クライアントが `https://<GB10>/` で届く名前。内部CAなら配布方法（[claude-code-gb10.md](../claude-code-gb10.md)「証明書が内部CAのとき」） |
+| RAG 用 GB10 のホスト名と証明書 | クライアントが `https://<RAG用GB10>/` で届く名前。内部CAなら配布方法（[claude-code-gb10.md](../claude-code-gb10.md)「証明書が内部CAのとき」） |
 | MCP のトークン | `openssl rand -hex 32` などで作る。利用者へ渡す方法も決める |
-| モデルの接続先 | **本書の範囲外。** Claude Code の推論を今の接続先（LiteLLM など）のままにするか、GB10 の `/llm/` に替えるかは別に決める。替えるなら [claude-code-gb10.md](../claude-code-gb10.md) 手順3。GB10 で別の推論エンジンが既に動いているなら、`deploy/gb10/compose.yaml` の vLLM 3つが同居できるメモリが残っているかを先に確かめる |
+| `/llm/` を外へ開くか | Nginx の設定（`deploy/gb10/nginx-rag.conf`）は、RAG 用 GB10 の gpt-oss-120b を `/llm/` で外へ出す。3台構成では Claude Code はここを使わない。開けておく理由が無ければ、`location /llm/` の2つを外す（外さなくても `--api-key` が守る） |
 | 並行期間の長さ | 目安は全員の切り替え完了から1〜2週間 |
 
 ### 0-2. Windows の今の状態を控える
@@ -70,7 +92,7 @@ Get-ChildItem vector_store.sqlite3, docs_store.sqlite3 | Select-Object Name, Len
 Get-ChildItem source -Recurse -File | Measure-Object | Select-Object Count
 ```
 
-## 段階1：GB10 を立てる（DB はまだ置かない）
+## 段階1：RAG 用 GB10 を立てる（DB はまだ置かない）
 
 [server-deployment.md](../server-deployment.md) の**手順1〜5**を行う（前提・配置と実行ユーザー・
 設定ファイル・モデルとリランカーの事前取得・vLLM の起動）。
@@ -82,7 +104,7 @@ Get-ChildItem source -Recurse -File | Measure-Object | Select-Object Count
 確かめる：`server-deployment.md` 手順5の「確かめる」が通る。とくに埋め込みの vLLM
 （`127.0.0.1:8002`）が `bge-m3` を返すこと。段階2の互換性の確認がこれを使う。
 
-## 段階2：Windows の DB と資料を GB10 へ写す
+## 段階2：Windows の DB と資料を RAG 用 GB10 へ写す
 
 ### 2-1. Windows 側を止めて写す
 
@@ -120,13 +142,13 @@ nssm start local-docs-mcp
 
 `docs_source/` は git で追跡済みなので写さない（GB10 の複製に入っている）。
 
-### 2-2. GB10 へ運んで置く
+### 2-2. RAG 用 GB10 へ運んで置く
 
 Windows の PowerShell から、フォルダごと送る（Windows 10 以降は `scp` が入っている）。
 `*` で個別に指定しないのは、Windows の `scp` がワイルドカードを展開しないことがあるため。
 
 ```powershell
-scp -r C:\App\migration <GB10の管理ユーザー>@<GB10>:/tmp/rag-migration
+scp -r C:\App\migration <RAG用GB10の管理ユーザー>@<RAG用GB10>:/tmp/rag-migration
 ```
 
 GB10 側に `/tmp/rag-migration` が無ければ、その名前で作られる（既にあると、その下に
@@ -167,15 +189,15 @@ sudo -u rag bash -c 'set -a; . /etc/rag/rag.env; set +a; ./rag_env/bin/python -m
 参考：開発機の Colab（L4）では、両方のDBとも最小 0.9997 以上で合格した（2026-11-23）。
 GB10 では測っていない。
 
-## 段階3：GB10 を起動して受け入れ確認
+## 段階3：RAG 用 GB10 を起動して受け入れ確認
 
 [server-deployment.md](../server-deployment.md) の**手順6・7**を行う（`rag-web` と `rag-mcp` の起動、
 Nginx と MCP のトークン）。そのあと同書の「受け入れ確認の項目」を通す。とくに次の3つ。
 
-- 画面（`https://<GB10>/`）の社内資料のチャットで、Windows の画面と同じ質問に同じ出典が返る
+- 画面（`https://<RAG用GB10>/`）の社内資料のチャットで、Windows の画面と同じ質問に同じ出典が返る
 - `sudo systemctl restart rag-mcp` の直後の最初の `search_tech_docs` が、`Reranker 未計測` ではなく
   `Reranker 0.xx` で返る（リランカーがオフラインで読めている）
-- MCP のトークン無しの `https://<GB10>/mcp` が 401 になる
+- MCP のトークン無しの `https://<RAG用GB10>/mcp` が 401 になる
 
 ここまでは利用者に影響しない。クライアントはまだ Windows を向いている。
 
@@ -192,7 +214,7 @@ Copy-Item $env:USERPROFILE\.claude\CLAUDE.md "$env:USERPROFILE\.claude\CLAUDE.md
 claude mcp get local_docs        # 今の接続先（http://<検索サーバIP>:11434/mcp）を控える
 ```
 
-VS Code のユーザー設定（`claudeCode.environmentVariables`）を変える場合は、その JSON も控える。
+VS Code のユーザー設定（`claudeCode.environmentVariables`）は変えない（推論は LiteLLM のまま）。
 
 ### 4-2. MCP の登録を付け替える
 
@@ -200,7 +222,7 @@ VS Code のユーザー設定（`claudeCode.environmentVariables`）を変える
 
 ```powershell
 claude mcp remove local_docs --scope user
-claude mcp add --transport http --scope user local_docs https://<GB10>/mcp `
+claude mcp add --transport http --scope user local_docs https://<RAG用GB10>/mcp `
   --header "Authorization: Bearer <MCP のトークン>"
 claude mcp list        # local_docs が Connected であること
 ```
@@ -209,8 +231,12 @@ claude mcp list        # local_docs が Connected であること
 
 ### 4-3. `settings.json` と `CLAUDE.md` を直す
 
-[claude-code-gb10.md](../claude-code-gb10.md) の手順3・4のとおりにする。11434 の手順書で
-設定済みのクライアントなら、差分は次のとおりである。
+11434 の手順書で設定済みのクライアントなら、変えるのは次の表だけである。
+
+**[claude-code-gb10.md](../claude-code-gb10.md) 手順3の `settings.json` の例は丸写ししない。**
+あの例は RAG 用 GB10 の `/llm/` を推論先にする1台構成のもので、`env` の `ANTHROPIC_*` を
+写すと推論が LiteLLM（GB10-A / GB10-B）から外れ、プルダウン（`modelPicker`）の Qwen も
+使えなくなる。使うのは同書の `permissions` の部分と、手順4（context7 と `CLAUDE.md`）だけである。
 
 | 場所 | 変えること |
 | --- | --- |
@@ -219,15 +245,15 @@ claude mcp list        # local_docs が Connected であること
 | `env.ENABLE_TOOL_SEARCH` | `"false"` のまま（11434 の手順書で入れてある） |
 | context7 | `claude mcp remove context7 --scope user`。プラグインで入れていれば `/plugin` で無効にし、`/mcp` に出た名前で deny を足す（`claude-code-gb10.md` 手順4） |
 | `CLAUDE.md` | 「外部ドキュメントの参照」節を、`claude-code-gb10.md` 手順4の `search_tech_docs` の文面に**置き換える**。社内資料の節はそのまま |
-
-モデルの接続先を GB10 の `/llm/` に替える場合だけ、`env` の `ANTHROPIC_*` も同書の手順3に
-合わせる（段階0-1）。
+| `env.ANTHROPIC_*`・`modelPicker`・VS Code の `claudeCode.environmentVariables` | **変えない** |
 
 VS Code を**完全に終了してから**起動し直す（Reload Window では古い設定が残ることがある）。
 
 ## 段階5：切り替えたクライアントで確かめる
 
-[claude-code-gb10.md](../claude-code-gb10.md) の手順5を通す。最低限、次の4つ。
+[claude-code-gb10.md](../claude-code-gb10.md) の手順5の表（技術ドキュメントの検索）を通す。最低限、次の4つ。
+プルダウンの **Qwen3-Coder-Next と gpt-oss-120b の両方で**行う。11434 の確認で通っているのは
+Qwen だけで、gpt-oss-120b でツールが呼ばれるかはまだ確かめていない。
 
 | # | 操作 | 正しい結果 |
 | --- | --- | --- |
