@@ -220,3 +220,26 @@ def test_a_non_empty_unrecorded_store_still_stops_a_non_bge_m3_setting(collectio
 def test_open_store_accepts_a_brand_new_path_with_another_model(tmp_path, monkeypatch):
     monkeypatch.setenv("VLLM_EMBED_MODEL", "other-1024")
     open_store(str(tmp_path / "new.sqlite3")).close()
+
+
+def test_the_docs_ingest_command_is_defined_once():
+    """技術DBの取り込みコマンドは store にだけ書く。
+
+    画面・実測スクリプト・MCP サーバが各自で持つと、片方だけ直したときに
+    案内どおり実行しても別のDBへ取り込まれる。MCP サーバは rag_web.app
+    （FastAPI の画面一式）を読み込めないので、共通の置き場所が要る。
+    """
+    from rag_web import app
+    from scripts import check_retrieval
+
+    assert store.DOCS_INGEST_COMMAND == (
+        "python -m scripts.fetch_docs のあと "
+        "python -m scripts.ingest_source --source-dir docs_source "
+        "--db docs_store.sqlite3 --keep-code-blocks"
+    )
+    assert store.DOCS_INGEST_COMMAND.endswith(store.DOCS_INGEST_SOURCE_COMMAND)
+    assert store.DOCS_DB_FILENAME in store.DOCS_INGEST_SOURCE_COMMAND
+    # オフラインの GB10 では fetch_docs を走らせられない。MCP の案内はこちらを使う。
+    assert "fetch_docs" not in store.DOCS_INGEST_SOURCE_COMMAND
+    assert app.DOCS_INGEST_COMMAND is store.DOCS_INGEST_COMMAND
+    assert check_retrieval.DOCS.ingest_command is store.DOCS_INGEST_COMMAND

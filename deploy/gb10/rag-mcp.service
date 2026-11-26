@@ -1,5 +1,7 @@
 # /etc/systemd/system/rag-mcp.service に置く。実測はしていない（GB10 の実機で起動したことがない）。
-# 社内資料の検索（MCP の search_documents）を streamable-http で常駐させる。
+# 社内資料の検索（MCP の search_documents）と技術ドキュメントの検索（search_tech_docs）を
+# streamable-http で常駐させる。リランカーをオフラインで使う HF_HUB_OFFLINE=1 は
+# EnvironmentFile の rag.env から入る（docs/server-deployment.md 手順 3・4）。
 # 127.0.0.1 にだけ bind し、外からは Nginx の /mcp（トークン認証）だけが届く。
 [Unit]
 Description=RAG MCP server (local_docs, streamable-http)

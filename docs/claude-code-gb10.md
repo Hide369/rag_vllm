@@ -1,8 +1,9 @@
 # VS Code の Claude Code を GB10 の gpt-oss-120b と社内資料へ向ける
 
 社内のクライアントPC（Windows）の VS Code で Claude Code を使い、推論は社内LANの GB10 の
-vLLM に置いた `gpt-oss-120b` に行わせる。社内資料の検索（MCP の `search_documents`）も
-同じ GB10 から HTTP で引く。クラウドのモデルは使わない。
+vLLM に置いた `gpt-oss-120b` に行わせる。社内資料の検索（MCP の `search_documents`）と、
+ライブラリの公式ドキュメントの検索（`search_tech_docs`。context7 の置き換え）も同じ GB10 から
+HTTP で引く。クラウドのモデルは使わず、ライブラリを調べる検索語も社外に出さない。
 
 GB10 側の配置（vLLM・Nginx・MCP）は [server-deployment.md](server-deployment.md) にある。
 この文書は、その配置が済んだあとのクライアントの設定を扱う。
@@ -30,6 +31,7 @@ GB10 側の配置（vLLM・Nginx・MCP）は [server-deployment.md](server-deplo
 Windows（VS Code + Claude Code 拡張）
  ├ モデル ─ HTTPS 443 /llm/ ─▶ Nginx ─▶ 生成の vLLM（127.0.0.1:8001）  /v1/messages
  └ MCP    ─ HTTPS 443 /mcp  ─▶ Nginx ─▶ rag_mcp_server（127.0.0.1:8080）
+                                        search_documents（社内資料）／search_tech_docs（技術ドキュメント）
 ```
 
 vLLM は Anthropic Messages API（`/v1/messages`）を自分で話すので、変換プロキシ（LiteLLM など）は
@@ -88,6 +90,10 @@ VS Code の拡張機能の Claude Code も入れる。**この時点ではまだ
 
 ```json
 {
+  "permissions": {
+    "allow": ["mcp__local_docs__search_documents", "mcp__local_docs__search_tech_docs"],
+    "deny": ["mcp__context7__*"]
+  },
   "env": {
     "ANTHROPIC_BASE_URL": "https://<GB10のホスト名>/llm",
     "ANTHROPIC_AUTH_TOKEN": "<vLLM の --api-key と同じ値>",
@@ -95,6 +101,7 @@ VS Code の拡張機能の Claude Code も入れる。**この時点ではまだ
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-oss-120b",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-oss-120b",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-oss-120b",
+    "ENABLE_TOOL_SEARCH": "false",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "DISABLE_TELEMETRY": "1"
   }
@@ -108,6 +115,9 @@ VS Code の拡張機能の Claude Code も入れる。**この時点ではまだ
 | `ANTHROPIC_MODEL` | 既定のモデル。`--served-model-name` と一致させる |
 | `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` | `/model` の枠ごとの行き先。`haiku` は裏の処理（要約など）に使われる。潰さないと存在しないモデル名が飛ぶ |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` | 本筋以外の外部通信を止める。社内で閉じる構成では付ける |
+| `ENABLE_TOOL_SEARCH: "false"` | MCP のツール定義を最初の要求から全部モデルに渡す。下の「MCP tool search について」 |
+| `permissions.allow` | 検索のたびに許可を求めるダイアログを出さない。2つとも読み取りだけなので許可してよい |
+| `permissions.deny` の `mcp__context7__*` | context7 を誰かが登録し直しても呼ばせない。ライブラリを調べる検索語を社外に出さないための保険（手順4で登録も外す）。**プラグインとして入れた context7 には効かない**（手順4） |
 
 - **`ANTHROPIC_API_KEY` は設定しない。** `ANTHROPIC_AUTH_TOKEN` より優先され、どちらの認証が
   効いているか分からなくなる。
@@ -132,7 +142,7 @@ Windows の証明書ストアではなく、CA の証明書ファイルを環境
 （`unable to verify the first certificate`、`UNABLE_TO_GET_ISSUER_CERT_LOCALLY` など）が出るなら
 これが無い。`NODE_TLS_REJECT_UNAUTHORIZED=0` で検証を切ることはしない。
 
-## 4. クライアント: 社内資料の MCP を登録する
+## 4. クライアント: 社内資料と技術ドキュメントの MCP を登録する
 
 ```powershell
 claude mcp add --transport http --scope user local_docs https://<GB10のホスト名>/mcp `
@@ -140,14 +150,55 @@ claude mcp add --transport http --scope user local_docs https://<GB10のホス�
 claude mcp list        # local_docs が Connected であること
 ```
 
+1つの登録で `search_documents`（社内資料）と `search_tech_docs`（技術ドキュメント）の両方が
+使える。名前は `local_docs` にする（手順3の `permissions.allow` がこの名前を前提にしている）。
+
 `<MCP のトークン>` は Nginx の `/etc/nginx/rag/mcp-token.conf` に書いた値で、vLLM のキーとは
 別のものである。末尾の `/mcp` を省かないこと（省くと 404）。**この登録のコマンドや
 `~/.claude.json` にトークンが残る**ので、共有しないこと。
 
-`search_documents` を呼ばせる指示は、`%USERPROFILE%\.claude\CLAUDE.md` に書く（接続先だけでは
-どの質問で検索するかは決まらない）。書き方は [claude-code-vscode.md](claude-code-vscode.md)
-と [mcp-server-network.md](mcp-server-network.md) にある。接続できているのに
-`search_documents` が呼ばれないときは [mcp-tool-not-called.md](mcp-tool-not-called.md)。
+context7 を登録していれば外す。ライブラリを調べる先は `search_tech_docs` に置き換わる。
+登録していなければ「見つからない」と出るだけでよい。
+
+```powershell
+claude mcp remove context7 --scope user
+```
+
+**プラグインとして入れた context7 はこのコマンドでは外れず、手順3の `mcp__context7__*` の
+拒否も効かない。** プラグインが持つ MCP サーバは `mcp__plugin_<プラグイン名>_<サーバ名>__…` の
+名前になるためである。`/mcp` の一覧に context7 を含む名前が残っていないかを見て、
+プラグインなら `/plugin` で無効にする。あわせて、その一覧に出た名前で `permissions.deny` に
+`mcp__plugin_<プラグイン名>_<サーバ名>__*` を足す（名前は版によって変わりうるので、推測で
+書かず一覧から写す）。
+
+### `CLAUDE.md` に、いつ検索するかを書く
+
+接続先を登録しても、どの質問で検索するかはモデルが決める。`%USERPROFILE%\.claude\CLAUDE.md` に
+次を書く（既にあれば追記する。context7 を使う「外部ドキュメントの参照」節があれば、この節で
+**置き換える**）。社内資料の節の残りの書き方は [claude-code-vscode.md](claude-code-vscode.md) にある。
+
+```markdown
+## 社内資料の参照
+
+- 社内資料の検索には `mcp__local_docs__search_documents` ツールを使う。
+
+## 外部ドキュメントの参照
+
+- OSS ライブラリ・フレームワークの API や設定は `mcp__local_docs__search_tech_docs` で調べる。
+  収録しているライブラリはツールの説明にある。
+- 検索語は英語の疑問文で書く（例: `How do I cache data in Streamlit?`）。
+- 収録しているライブラリを使うコードを書くときも、引数・既定値・版による違いに自信が無ければ、
+  書く前に調べる。
+- 0件・無関係なら context7 やウェブ検索で補わない。一般的な知識で答えてよいが、技術ドキュメントDB
+  では確認できなかったと断り、版に依存する記述は推測であると明示する。
+```
+
+`search_tech_docs` は、コーディングのたびに毎回呼ばれるものではない。呼ぶかどうかはモデルが
+決め、収録していないライブラリや調べる必要の無い編集では呼ばれない。検索は `search_documents`
+と同じ列に並ぶ（1回数秒。GB10 の再起動後や技術DBの取り込み直後の最初の1回は、索引の
+組み立てでさらに約5秒かかる）ので、毎回呼ばせる仕組み（hooks での強制など）は入れない。
+
+接続できているのにツールが呼ばれないときは [mcp-tool-not-called.md](mcp-tool-not-called.md)。
 
 ## 5. 動かして確かめる
 
@@ -161,6 +212,19 @@ VS Code で Claude Code を開き、次を聞く。
 - **ファイルを実際に読みに行くこと** — 読まずに一般論を答えるなら、道具呼び出しが効いていない。
 - **社内資料の質問で `search_documents` が呼ばれ、出典つきで返ること。**
 
+技術ドキュメントの検索も確かめる。ローカルLLMのツール呼び出しには揺れがあるので、
+2つ目は同じ依頼を3回投げる。呼ばれたかどうかは、会話に表示されるツール呼び出しで判断する。
+
+| # | 操作 | 正しい結果 |
+| --- | --- | --- |
+| 1 | 「Streamlit でデータをキャッシュする方法は？」と聞く | `search_tech_docs` が**英語の**検索語で呼ばれ、出典つきで答える |
+| 2 | ツール名を言わずに「Streamlit でCSVを読んで表にするページを書いて」と頼む（3回） | 書く途中で自分から `search_tech_docs` を呼ぶ |
+| 3 | 収録していないライブラリ（例: Django）の使い方を聞く | 呼ばないか、0件で打ち切り、「技術ドキュメントDBでは確認できなかった」と断って答える |
+| 4 | 1〜3 の間 | `context7` が一度も呼ばれない |
+
+2 が本書の要である。質問されて調べるのと、コードを書く途中で自分から調べるのは別の振る舞いで、
+このツールが要るのは後者である。
+
 ### 確認項目（未確認のもの）
 
 - [ ] **VS Code 拡張が `settings.json` の `env` を、CLI と同じように読むか。** 設計時点で
@@ -172,9 +236,22 @@ VS Code で Claude Code を開き、次を聞く。
 
 ## MCP tool search について
 
-Claude Code は `ANTHROPIC_BASE_URL` が Anthropic 以外を指しているとき、MCP の tool search
-（道具が多いときに検索で絞る仕組み）を既定で切る。`local_docs` のような普通の MCP は
-そのまま使える。ただし道具の定義が増えるほど、道具呼び出しの成否はモデルの出来に懸かる。
+Claude Code は MCP のツール定義をすぐには渡さず、モデルが `ToolSearch` で探してから読み込む
+仕組み（tool search）を持つ。この仕組みは Anthropic 固有のフィールド（`defer_loading`・
+`tool_reference`）に依存している。
+
+**v2.1.304 から、`ANTHROPIC_BASE_URL` がゲートウェイを指していても tool search は既定で有効に
+なった**（それ以前は既定で無効だった。公式文書「Tool search through an LLM gateway」、
+2026-11-26 に確認）。ゲートウェイが 400 / 422 を返せば外して送り直す仕組みがあるが、推論
+エンジンがこれらのフィールドを**エラーにせず黙って無視した**場合は送り直しが起きない。
+その結果、モデルには `search_documents` / `search_tech_docs` の定義が届かず、呼びようがなくなる。
+
+手順3で `ENABLE_TOOL_SEARCH` を `false` にしているのはこのためである。定義は毎回 `tools` 配列に
+入る。`local_docs` のツールは2つだけなので、全部渡してもコンテキストはほとんど食わない。
+Ollama 版（Hide369/local-llm-rag の `docs/mcp/mcp-server-11434-claude-code.md`）では、この値を
+`false` にした構成で、Qwen3-Coder-Next がツール名を言わなくても毎回 `search_documents` を
+呼んだ（2026-11-25）。道具の定義が増えるほど、道具呼び出しの成否はモデルの出来に懸かる点は
+変わらない。
 
 ## うまくいかないとき
 
@@ -189,6 +266,11 @@ Claude Code は `ANTHROPIC_BASE_URL` が Anthropic 以外を指していると�
 | 応答が途中で切れる／空 | 思考で出力の上限を使い切った | 出力の上限や `--max-model-len` を見直す |
 | 設定が効かない | VS Code を再起動していない、JSON の構文エラー、拡張が env を読まない | 完全に再起動。Settings Error を見る。確認項目の1つ目 |
 | Anthropic へのログインを求められる | `settings.json` の場所か綴りが違う | `%USERPROFILE%\.claude\settings.json` であること |
+| ツール名を挙げても `search_documents` / `search_tech_docs` が一度も呼ばれない | ツールの定義がモデルに届いていない | `ENABLE_TOOL_SEARCH` が `false` か、VS Code を完全に再起動したか（上の「MCP tool search について」） |
+| `search_tech_docs` が「技術ドキュメントのDBが空です」 | GB10 に技術DBが無い。置いたのに出るなら、MCP サーバが置く前の空のDBを抱えている | [server-deployment.md](server-deployment.md) 手順6「技術ドキュメントDBを置く」。置いたあとなら `sudo systemctl restart rag-mcp` |
+| `search_tech_docs` が「この DB は … で作られています」 | 技術DBの埋め込みモデルが `VLLM_EMBED_MODEL` と違う | [server-deployment.md](server-deployment.md)「既存の DB を持ち込むとき」 |
+| `search_tech_docs` の結果が話題とずれる・件数が多すぎる | リランカーが使えず、関連の薄い結果を落とせていない | [server-deployment.md](server-deployment.md) 手順4の2行目（オフラインの確認）が `ok` になるか |
+| 「英語の疑問文に書き直して」が返り続ける | モデルが日本語のまま呼び直している | `CLAUDE.md` に「検索語は英語の疑問文で書く」の行があるか（手順4） |
 
 ## 旧手順（LiteLLM + Ollama）
 
@@ -202,4 +284,5 @@ GB10 は vLLM に替わり、vLLM が `/v1/messages` を直接話すため、こ
 
 - [GB10 への配置手順](server-deployment.md)
 - [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md)
+- [技術ドキュメントDBを MCP から検索する設計書](superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md)
 - [Claude Code 環境変数リファレンス](https://code.claude.com/docs/en/env-vars)

@@ -18,8 +18,13 @@ def _fresh_state(monkeypatch):
     リランカーの準備済みフラグを抱える。テスト側で差し替え忘れると、前の
     テストが開いたストアをそのまま引き継ぎ、そのテストは何も検証しないまま
     緑になる。autouse にするのは、忘れる余地を無くすためである。
+
+    技術ドキュメント側の _docs_state も同じ理由で捨てる。リランカーの準備済み
+    フラグはプロセスで1つなので _State の外にある。これもテストごとに戻す。
     """
     monkeypatch.setattr(rag_mcp_server, "_state", rag_mcp_server._State())
+    monkeypatch.setattr(rag_mcp_server, "_docs_state", rag_mcp_server._State())
+    monkeypatch.setattr(rag_mcp_server, "_reranker_ready", False)
 
 
 def _hit(text="本文です。", distance=0.413, bm25=45.76, rerank=1.9, occurrences=None):
@@ -604,3 +609,399 @@ def test_a_mismatched_db_returns_the_reason_to_the_user(monkeypatch, tmp_path):
     assert "qwen3-embedding" in answer
     assert "VLLM_EMBED_MODEL" in answer
     assert rag_mcp_server._state.store is None, "食い違ったDBを開いたまま抱えている"
+
+
+# --- search_tech_docs（技術ドキュメント） -------------------------------------
+#
+# 設計書: docs/superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md
+# 社内資料と同じ検索の本体を使い、違いは _Corpus の値（DB・床・文言）だけに
+# まとめてある。ここでは「2つのコーパスが混ざらないこと」を中心に見る。
+
+_ENGLISH = "How do I cache data in Streamlit?"
+
+
+def _wire(monkeypatch, search_fn, internal=None, docs=None, rerank=None):
+    """両方のツールの外側（DB・索引・リランカー・検索）を差し替える。"""
+    monkeypatch.setattr(rag_mcp_server, "_open", lambda: internal or _FakeCollection())
+    monkeypatch.setattr(rag_mcp_server, "_open_docs", lambda: docs or _FakeCollection())
+    monkeypatch.setattr(rag_mcp_server, "build_index", lambda collection: "索引")
+    monkeypatch.setattr(rag_mcp_server, "_ensure_reranker", lambda: rerank)
+    monkeypatch.setattr(rag_mcp_server, "search", search_fn)
+
+
+def test_each_tool_opens_its_own_db(monkeypatch):
+    """社内資料は DB_PATH、技術ドキュメントは DOCS_DB_PATH を開く。
+
+    取り違えても例外は出ない。社内規程の質問にライブラリの文書が返るか、
+    その逆になるだけで、どちらも「それらしい検索結果」の顔をして届く。
+    """
+    from ingest import store
+
+    opened = []
+
+    def recording_open(path):
+        opened.append(path)
+        return _FakeCollection()
+
+    monkeypatch.setattr(rag_mcp_server.store, "open_store", recording_open)
+    monkeypatch.setattr(rag_mcp_server, "build_index", lambda collection: "索引")
+    monkeypatch.setattr(rag_mcp_server, "_ensure_reranker", lambda: None)
+    monkeypatch.setattr(rag_mcp_server, "search", lambda *a, **k: [])
+
+    rag_mcp_server.search_documents("質問")
+    rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    assert opened == [str(store.DB_PATH), str(store.DOCS_DB_PATH)]
+
+
+def test_only_the_tech_docs_tool_applies_the_rerank_floor(monkeypatch):
+    """床は技術ドキュメントにだけ効かせる。
+
+    技術ドキュメントは距離が圏内・圏外を分けないので、採否は床が決める
+    （ingest/retrieval.py の DOCS_RERANK_FLOOR）。社内資料は床を実測していない。
+    測っていない値を効かせないこと。
+    """
+    from ingest.retrieval import DOCS_RERANK_FLOOR
+
+    floors = []
+
+    def recording_search(*args, **kwargs):
+        floors.append(kwargs.get("rerank_floor"))
+        return []
+
+    _wire(monkeypatch, recording_search)
+
+    rag_mcp_server.search_documents("質問")
+    rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    assert floors == [None, DOCS_RERANK_FLOOR]
+
+
+def test_every_argument_is_wired_through_for_tech_docs(monkeypatch):
+    """技術ドキュメント側でも search() への配線を4つとも固定する。"""
+    seen = {}
+    reranker_marker = object()
+
+    def fake_search(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return []
+
+    _wire(monkeypatch, fake_search, rerank=reranker_marker)
+
+    rag_mcp_server.search_tech_docs(_ENGLISH, n_results=2)
+
+    args, kwargs = seen["args"], seen["kwargs"]
+    passed = {**dict(zip(("collection", "query"), args)), **kwargs}
+    assert passed["query"] == _ENGLISH, "検索語がそのまま渡っていない"
+    assert passed["index"] == "索引", "BM25索引を渡していない（ベクトル単独に退化する）"
+    assert passed["rerank"] is reranker_marker, "リランカーを渡していない（床も効かなくなる）"
+    assert passed["n_results"] == 2
+
+
+def test_tech_docs_results_carry_no_internal_wording(monkeypatch):
+    """技術ドキュメントの結果に社内資料向けの注意書きを付けない。
+
+    「社内固有の事項は推測しない」が付くと、ライブラリの質問なのに社内の
+    話として扱われ、一般知識で答えてよいかの判断が狂う。
+    """
+    _wire(monkeypatch, lambda *a, **k: [_hit()])
+
+    text = rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    assert "技術ドキュメントから 1 件が見つかりました。" in text
+    assert "context7" in text
+    assert "社内固有" not in text
+    assert "社内資料" not in text
+
+
+def test_internal_results_carry_no_tech_docs_wording(monkeypatch):
+    """社内資料の結果・0件の文言は変えない。技術DB向けの語が混ざらない。"""
+    for hits in ([_hit()], []):
+        _wire(monkeypatch, lambda *a, _hits=hits, **k: _hits)
+
+        text = rag_mcp_server.search_documents("質問")
+
+        assert "技術ドキュメント" not in text
+        assert "context7" not in text
+
+
+def test_tech_docs_no_hits_forbids_context7_and_web_search(monkeypatch):
+    """0件のときに context7 やウェブ検索で補わせない（設計書4.4）。
+
+    このツールは検索語を社外に出さないために置く。0件を「まだ根拠が見つかって
+    いない」と読ませると、モデルは context7 やウェブ検索へ取りにいき、目的
+    そのものが崩れる。一般知識で答えてよいことと、版に依存する記述は推測だと
+    断ることもあわせて伝える。
+    """
+    _wire(monkeypatch, lambda *a, **k: [])
+
+    text = rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    for phrase in (
+        "技術ドキュメントを検索しましたが",
+        "見つかりませんでした",
+        "context7",
+        "ウェブ検索",
+        "補おうとせず",
+        "一般的な知識",
+        "技術ドキュメントDBでは確認できなかった",
+        "バージョン",
+        "推測",
+    ):
+        assert phrase in text, phrase
+    assert "社内固有" not in text
+
+
+def test_an_empty_tech_docs_db_shows_only_the_ingest_source_command(monkeypatch):
+    """空の技術DBでは取り込みコマンドを示す。fetch_docs は示さない。
+
+    オフラインの GB10 では fetch_docs を走らせられず、docs_source/ は git で
+    追跡済みなので取得し直す必要も無い。
+    """
+    from ingest import store
+
+    class _Empty(_FakeCollection):
+        def count(self):
+            return 0
+
+    _wire(monkeypatch, lambda *a, **k: [], docs=_Empty())
+
+    text = rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    assert store.DOCS_INGEST_SOURCE_COMMAND in text
+    assert "fetch_docs" not in text
+
+
+def test_a_mismatched_docs_db_returns_the_reason(monkeypatch, tmp_path):
+    """技術DBの埋め込みモデルが設定と違えば、理由を返してDBを抱えない。
+
+    Ollama 版から持ち込んだ docs_store.sqlite3 は、移行で設定と食い違いうる。
+    開いたまま抱えると、DBを入れ直してもサービスを再起動するまで直らない。
+    """
+    from ingest import store, vector_store
+
+    path = tmp_path / "docs_store.sqlite3"
+    seed = vector_store.open_store(str(path))
+    seed.set_meta_if_absent("embedding_model", "qwen3-embedding")
+    seed.set_meta_if_absent("embedding_dim", "2560")
+    seed.close()
+    monkeypatch.setattr(store, "DOCS_DB_PATH", path)
+
+    answer = rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    assert "qwen3-embedding" in answer
+    assert "VLLM_EMBED_MODEL" in answer
+    assert rag_mcp_server._docs_state.store is None, "食い違ったDBを開いたまま抱えている"
+
+
+def test_a_revision_change_in_one_corpus_does_not_rebuild_the_other(monkeypatch):
+    """索引はコーパスごとに持つ。片方の取り込みでもう片方を組み直さない。
+
+    技術ドキュメントの索引は5万チャンク規模で、組み直しは社内資料よりずっと
+    重い。社内資料を1件入れ替えるたびに技術側まで組み直すと、遅くなるだけで
+    例外は出ないので、テストでしか捕まえられない。
+    """
+    internal = _FakeCollection()
+    docs = _FakeCollection()
+    built = []
+
+    _wire(monkeypatch, lambda *a, **k: [], internal=internal, docs=docs)
+    monkeypatch.setattr(
+        rag_mcp_server, "build_index", lambda collection: built.append(collection) or "索引"
+    )
+
+    rag_mcp_server.search_documents("質問")
+    rag_mcp_server.search_tech_docs(_ENGLISH)
+    internal.bump()
+    rag_mcp_server.search_documents("質問")
+    rag_mcp_server.search_tech_docs(_ENGLISH)
+
+    assert built == [internal, docs, internal]
+
+
+def test_the_reranker_is_checked_once_across_both_tools(monkeypatch):
+    """リランカーの確認は、どちらのツールが先でもプロセスで1回。
+
+    モデルは2つのコーパスで同じである。コーパスごとに確かめると、オフラインで
+    なければ huggingface.co への問い合わせが倍になる。
+    """
+    monkeypatch.setattr(rag_mcp_server, "_open", lambda: _FakeCollection())
+    monkeypatch.setattr(rag_mcp_server, "_open_docs", lambda: _FakeCollection())
+    monkeypatch.setattr(rag_mcp_server, "build_index", lambda collection: "索引")
+    monkeypatch.setattr(rag_mcp_server, "search", lambda *a, **k: [])
+
+    calls = []
+    monkeypatch.setattr(
+        rag_mcp_server.reranker, "check_reranker", lambda: calls.append(1)
+    )
+
+    rag_mcp_server.search_tech_docs(_ENGLISH)
+    rag_mcp_server.search_documents("質問")
+
+    assert len(calls) == 1, "コーパスごとにリランカーを確かめ直している"
+
+
+def test_the_two_tools_never_search_at_the_same_time(monkeypatch):
+    """2つのツールは同じロックで直列化される。
+
+    別々のロックにすると、両方が共有するリランカーの遅延初期化が守られない。
+    """
+    import threading
+    import time
+
+    inflight = []
+    peak = []
+    guard = threading.Lock()
+
+    def slow_search(*a, **k):
+        with guard:
+            inflight.append(1)
+            peak.append(len(inflight))
+        time.sleep(0.05)
+        with guard:
+            inflight.pop()
+        return []
+
+    _wire(monkeypatch, slow_search)
+
+    threads = [
+        threading.Thread(target=rag_mcp_server.search_documents, args=("質問",)),
+        threading.Thread(target=rag_mcp_server.search_tech_docs, args=(_ENGLISH,)),
+        threading.Thread(target=rag_mcp_server.search_documents, args=("質問",)),
+        threading.Thread(target=rag_mcp_server.search_tech_docs, args=(_ENGLISH,)),
+    ]
+    for one in threads:
+        one.start()
+    for one in threads:
+        one.join()
+
+    assert max(peak) == 1, f"検索が同時に走っている（最大 {max(peak)} 本）"
+
+
+# --- search_tech_docs の入口と説明文（設計書4.3・4.5） ------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "きゃっしゅ",
+        "キャッシュ",
+        "設定",
+        "ｷｬｯｼｭ",
+        "How do I use 設定 in Streamlit?",
+    ],
+)
+def test_a_japanese_query_is_not_searched(monkeypatch, query):
+    """日本語を含む検索語は検索せず、英語で呼び直させる。
+
+    技術ドキュメントは英語で、日本語のまま検索するとほぼ確実にリランカーの床で
+    全件落ちる。0件の文言は「再検索しない」と言うので、そのまま返すとモデルは
+    「資料に無い」と結論して呼び直す機会を失う。
+    """
+    calls = []
+    _wire(monkeypatch, lambda *a, **k: calls.append(1) or [])
+
+    text = rag_mcp_server.search_tech_docs(query)
+
+    assert calls == [], "日本語の検索語で検索している"
+    assert "英語" in text
+    assert "search_tech_docs" in text
+    assert "見つかりませんでした" not in text
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "How do I cache data in Streamlit？",
+        "How do I use pymupdf！",
+        "How\u3000do I cache data in Streamlit?",
+        "How do I use pandas read_csv \u30fb to_csv?",
+    ],
+)
+def test_full_width_punctuation_is_not_treated_as_japanese(monkeypatch, query):
+    """全角の記号・空白だけなら日本語とみなさない。
+
+    IME で「？」や全角スペースが混ざるのはよくある。はねると、モデルは同じ
+    検索語で呼び直し続ける。
+    """
+    calls = []
+    _wire(monkeypatch, lambda *a, **k: calls.append(1) or [])
+
+    rag_mcp_server.search_tech_docs(query)
+
+    assert calls == [1]
+
+
+def test_a_japanese_query_does_not_wait_for_a_running_search(monkeypatch):
+    """はね返すだけの応答は、他の人の検索が終わるのを待たない。
+
+    検索1回は数秒かかり、複数人が並べば十数秒になる。検索しない応答を
+    その列に並べる理由が無い。
+    """
+    import threading
+
+    _wire(monkeypatch, lambda *a, **k: [])
+    result = {}
+
+    def call():
+        result["text"] = rag_mcp_server.search_tech_docs("キャッシュ")
+
+    rag_mcp_server._search_lock.acquire()
+    try:
+        thread = threading.Thread(target=call)
+        thread.start()
+        thread.join(timeout=1)
+        assert not thread.is_alive(), "日本語の検索語なのにロック待ちになっている"
+    finally:
+        rag_mcp_server._search_lock.release()
+    thread.join()
+    assert "英語" in result["text"]
+
+
+def test_the_description_lists_each_library():
+    """説明文に収録ライブラリと版を並べる。版の記載が無いものは名前だけ。
+
+    モデルは一覧に無いライブラリについて呼ばずに済む。版を並べるのは、
+    モデルの知識と収録している版が違いうることを読ませるため。
+    """
+    from types import SimpleNamespace
+
+    description = rag_mcp_server._tech_docs_description([
+        SimpleNamespace(name="streamlit", version="1.61.1"),
+        SimpleNamespace(name="ollama", version="0.0.0"),
+    ])
+
+    assert "streamlit 1.61.1" in description
+    assert "ollama" in description
+    assert "0.0.0" not in description
+    assert "How do I cache data in Streamlit?" in description
+    assert "search_documents" in description
+
+
+def test_the_registered_tool_lists_the_configured_libraries():
+    """登録されたツールの説明文が docs_sources.toml の全ライブラリを含む。
+
+    説明文を組む関数があっても、登録に渡し忘れれば docstring のままになり、
+    モデルは収録範囲を知らずに呼ぶ。
+    """
+    import asyncio
+
+    from scripts.fetch_docs import load_sources
+
+    tools = {tool.name: tool for tool in asyncio.run(rag_mcp_server.mcp.list_tools())}
+    description = tools["search_tech_docs"].description
+
+    for source in load_sources():
+        assert source.name in description, source.name
+
+
+def test_search_documents_keeps_its_description():
+    """社内資料のツールの説明文は変えない。技術DBの話を混ぜない。"""
+    import asyncio
+
+    tools = {tool.name: tool for tool in asyncio.run(rag_mcp_server.mcp.list_tools())}
+    description = tools["search_documents"].description
+
+    assert description.startswith("社内資料を検索し、根拠となる原文を出典つきで返す。")
+    assert "技術ドキュメント" not in description

@@ -147,6 +147,11 @@ notepad $env:USERPROFILE\.claude\CLAUDE.md
 **冒頭の開発ガイドライン部分は貼らないこと。** superpowers スキル・PowerShell・
 仮想環境の取り決めであり、資料を引くだけの利用者には無関係である。
 
+**GB10 の構成では context7 を使わない。** ライブラリの調べものは MCP の `search_tech_docs` が
+受け持つので、「外部ドキュメントの参照」節は context7 の版ではなく
+[claude-code-gb10.md](claude-code-gb10.md) 手順4の文面を貼る（context7 の外し方も同じ手順にある）。
+以下は GB10 を使わず context7 を残す構成の話である。
+
 context7 も併用するなら「外部ドキュメントの参照」節も貼る。社内固有の語を context7
 のクエリに含めない、という制約はここにしか無い。context7 は社外のサービスであり、
 MCP サーバを経由しないため、この一行を落とすと社内の語がそのまま外へ出る。

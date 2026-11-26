@@ -1,8 +1,10 @@
 # GB10 への配置手順（vLLM 版）
 
 社内LANの GB10（DGX Spark、DGX OS 7 = Ubuntu 24.04、`aarch64`、統合メモリ 128GB）1台に、
-RAG の画面（`rag_web/`）、社内資料の検索（MCP）、vLLM 3つを置く手順である。設計は
+RAG の画面（`rag_web/`）、社内資料と技術ドキュメントの検索（MCP）、vLLM 3つを置く手順である。設計は
 [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md) にある。
+MCP の技術ドキュメント検索（`search_tech_docs`、context7 の置き換え）の設計は
+[技術ドキュメントDBを MCP から検索する設計書](superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md) にある。
 
 > **実測はしていない。** GB10 の実機はまだ使えず、この手順と `deploy/gb10/` の設定は
 > 一度も実機で動かしていない。確かめた範囲は次の2つだけである。
@@ -24,7 +26,8 @@ RAG の画面（`rag_web/`）、社内資料の検索（MCP）、vLLM 3つを置
 GB10  Nginx（TLS・認証）                      deploy/gb10/nginx-rag.conf
  ├ /       Basic 認証 ─▶ rag_web            127.0.0.1:8502  （systemd: rag-web.service）
  ├ /llm/v1/ vLLM の --api-key ─▶ 生成の vLLM 127.0.0.1:8001  gpt-oss-120b（/llm/ のほかは 404）
- └ /mcp    Bearer トークン ─▶ rag_mcp_server 127.0.0.1:8080  （systemd: rag-mcp.service）
+ └ /mcp    Bearer トークン ─▶ rag_mcp_server 127.0.0.1:8080  （systemd: rag-mcp.service。
+                                           search_documents と search_tech_docs）
                                            │
  vLLM（Docker compose）                     │ rag_web / MCP から（127.0.0.1）
  ├ 生成    127.0.0.1:8001  gpt-oss-120b      deploy/gb10/compose.yaml
@@ -35,8 +38,9 @@ SQLite: vector_store.sqlite3 / docs_store.sqlite3（/opt/rag 直下）
 
 - GB10 に Ollama は置かない。
 - vLLM と MCP は `127.0.0.1` にだけ bind する。LAN へ出るのは Nginx の 443 だけ。
-- 質問・資料の本文は GB10 の外へ出ない。出るのは、リランカーのモデルの有無を確かめる
-  huggingface.co への HEAD だけである（手順 4 で事前取得しておけば、オフラインでも動く）。
+- 質問・資料の本文は GB10 の外へ出ない。リランカーのモデルの有無を確かめる
+  huggingface.co への HEAD も、手順 4 で事前取得して `rag.env` の `HF_HUB_OFFLINE=1`
+  （手順 3）を入れれば出なくなる。
 
 ## 1. 前提を確かめる
 
@@ -105,8 +109,14 @@ RAG_WEB_FORWARDED_ALLOW_IPS=127.0.0.1
 RAG_WEB_MAX_UPLOAD_MB=50
 RAG_WEB_THREADPOOL_SIZE=40
 RAG_WEB_MAX_COWORK_JOBS=2
+
+HF_HUB_OFFLINE=1
 ```
 
+- `HF_HUB_OFFLINE=1` で、rag_web と MCP のリランカーが Hugging Face に問い合わせず、
+  手元のキャッシュだけを見る。**先に手順 4 の最後でリランカーを取得しておくこと。**
+  キャッシュが無いまま起動すると、リランカー無しで検索する（技術ドキュメントの
+  関連の薄い結果を落とす仕組みが効かない）。
 - `VLLM_*_URL` は **`/v1` を付けない**（付けると起動時に止まる。プログラム側が `/v1/...` を足す）。
 - `VLLM_*_MODEL` は `compose.yaml` の `--served-model-name` と一致させる。
 - `RAG_WEB_FORWARDED_ALLOW_IPS` は Nginx が同じ GB10 にあるので `127.0.0.1`。
@@ -136,10 +146,23 @@ hf download BAAI/bge-m3                               # 約2GB
 `HF_CACHE_DIR` をそこへ載せる）。`HF_HOME` 配下の `hub/` が、`HF_CACHE_DIR` の直下に
 見える形にすること。
 
-リランカー（`bge-reranker-v2-m3`、ONNX）は rag_web / MCP が初回の検索で確かめる。
-オフラインで使うなら、先に一度、ネットワークのある状態で `search_documents` か
-チャットの検索を実行して取得しておく（取得できないと、質問のたびに huggingface.co への
-HEAD を繰り返し、失敗する）。
+リランカー（`bge-reranker-v2-m3`、ONNX）は vLLM ではなく rag_web / MCP のプロセスが
+読む。`rag` ユーザーで取得しておく（手順 2 の venv と手順 3 の `rag.env` が要る）。
+
+```bash
+sudo -u rag bash -c 'set -a; . /etc/rag/rag.env; set +a; cd /opt/rag && HF_HUB_OFFLINE=0 ./rag_env/bin/python -c "from ingest import reranker; reranker.check_reranker(); print(\"ok\")"'
+sudo -u rag bash -c 'set -a; . /etc/rag/rag.env; set +a; cd /opt/rag && ./rag_env/bin/python -c "from ingest import reranker; reranker.check_reranker(); print(\"ok\")"'
+```
+
+1行目が外に出て取得し、2行目が `HF_HUB_OFFLINE=1` のままキャッシュから読めることを
+確かめる。どちらも `ok` になれば正しい。
+
+- 置き場所は `rag` のホームの `/opt/rag/.cache/huggingface` で、vLLM のモデル
+  （`/srv/models/huggingface`）とは別である。サービスも同じ `rag` ユーザーで動くので、
+  `HF_HOME` を指定しなくても置き場所は食い違わない。
+- `/srv/models/huggingface` に寄せないのは、`rag-*.service` の `ProtectSystem=strict` の下で
+  そこが読み取り専用になるためである。`/opt/rag` は `ReadWritePaths` で書ける。
+- `/opt/rag` はリポジトリの複製そのものなので、`.cache/` は `.gitignore` で除いてある。
 
 ## 5. vLLM を起動する
 
@@ -235,6 +258,30 @@ n=300・最小 0.999820・平均 0.999976 で、どちらも合格だった。GB
 終了コード 1 は不合格で、その場合は DB を取り込み直す。DB の `meta` 表には埋め込みモデルが記録され、
 設定と食い違えば開いた時点で止まる（記録の無い既存の DB は bge-m3・1024次元とみなす）。
 
+### 技術ドキュメントDBを置く
+
+MCP の `search_tech_docs`（Claude Code がライブラリの API を調べるツール。context7 の
+置き換え）は `/opt/rag/docs_store.sqlite3` を引く。社内資料とは別のDBである。
+
+- 開発機で作ったものを持ち込むなら、[技術ドキュメントDBの移植手順.md](技術ドキュメントDBの移植手順.md)
+  に従って `/opt/rag` に置き、上の `check_embedding_compat --db docs_store.sqlite3` を通す。
+  **ファイルを置き換える前に `sudo systemctl stop rag-web rag-mcp` で止め、置いてから
+  `start` する。** 起動中の MCP サーバは、一度でも `search_tech_docs` が呼ばれていれば
+  そのとき開いたDB（無ければ空のDBが作られる）をプロセスの生存期間ずっと抱える。止めずに
+  `mv`・`rsync` で差し替えると古い空のDBを引き続け、`cp` で上書きすると開いたままの
+  ファイルを壊しうる。
+- GB10 で作るなら、`docs_source/`（git で追跡済み）から取り込む。取得（`fetch_docs`）は
+  外へ出るので、オフラインの GB10 では行わない。
+  `sudo -u rag bash -c 'set -a; . /etc/rag/rag.env; set +a; cd /opt/rag && ./rag_env/bin/python -m scripts.ingest_source --source-dir docs_source --db docs_store.sqlite3 --keep-code-blocks'`
+- 置いていないと、`search_tech_docs` は「技術ドキュメントのDBが空です」を返す。
+  埋め込みモデルが `VLLM_EMBED_MODEL` と食い違っていれば「この DB は … で作られています」を返す。
+  再起動が要るかは直し方で決まる。
+  - 食い違いのDBを置き直す場合は、食い違ったDBを開いたまま抱えないので、次の検索から効く。
+    ただし置き直すのがファイルのコピーなら、上の箇条のとおり止めてから置く。
+  - GB10 上で `ingest_source` を走らせて入れる場合は、同じファイルへ SQLite 越しに書き込み、
+    MCP サーバは revision の変化を見て索引を組み直すので、再起動は要らない。
+  - 空のDBを抱えた状態から、ファイルのコピーで入れる場合は、止めてから置く（上の箇条）。
+
 ## 7. Nginx を置く
 
 ```bash
@@ -309,10 +356,15 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://<GB10>/llm/metrics            
 - [ ] Nginx 越しでログイン試行制限が利用者ごとに数えられる
 - [ ] 画像説明（Qwen3-VL-30B-A3B、FP8）の質。Colab の 8B（`vlm+embed` の組、A100）では、
   2026-11-23 に画像説明が返ることと、pptx の取り込みが通ることを確かめた。30B-A3B は未確認
+- [ ] `sudo systemctl restart rag-mcp` の直後の最初の `search_tech_docs` が、`HF_HUB_OFFLINE=1`
+  のまま Reranker のスコアつきで返る（見出しが `Reranker 未計測` ではなく `Reranker 0.xx`）
+- [ ] `search_tech_docs` と `search_documents` の両方が Claude Code から呼べる
+  （[claude-code-gb10.md](claude-code-gb10.md) 手順 5）
 
 ## 関連
 
 - [vLLM バックエンド切り替えの設計書](superpowers/specs/2026-11-22-vllm-backend-design.md)
+- [技術ドキュメントDBを MCP から検索する設計書](superpowers/specs/2026-11-24-tech-docs-mcp-tool-design.md)
 - [Claude Code から GB10 を使う](claude-code-gb10.md)
 - [社内資料の MCP サーバ](mcp-server.md) / [MCP を1台に集約する](mcp-server-network.md)
 - `deploy/gb10/`: `compose.yaml`、`rag-web.service`、`rag-mcp.service`、`nginx-rag.conf`
